@@ -11,27 +11,24 @@ def isprime(buffer):
     return buffer
 
 if __name__ == '__main__':
-
     
-
 
     register(10)
     register(20)
-    register(20)
-    unregister(30)
     time.sleep(10)
-    #for x in range(5):
-    #time.sleep(3)
+  
     id, buffer, len = get_request(20)
     if id < 0:
         print ("Expired Requests")
         exit(1)
-    #print(id)
-    print(buffer)
-    buffer = "Hello from server"
-    time.sleep(10)
+
+
     
-    send_reply(id, buffer, 18)
+    #buffer = isprime(buffer)
+    buffer = "Hello from server"
+    
+    time.sleep(10)
+    send_reply(id, buffer,REQUEST_LENGTH)
     print(requests)
     print_services()
     

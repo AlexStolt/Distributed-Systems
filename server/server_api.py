@@ -10,6 +10,10 @@ from typing import Any
 from dataclasses import dataclass
 import pickle
 
+ENABLE_BACKUP = False
+
+requests_list_mutex = threading.Lock()
+
 # Global Variables
 services = []
 requests  = []
@@ -46,6 +50,7 @@ class Request:
     client_sequence: tuple
     client_address: tuple
     service: int
+    processing: bool
 
     # Payload
     buffer: str
@@ -87,23 +92,20 @@ def get_request(service):
     JOIN_PING_CLIENT = False
     ABORT_PING_CLIENT = False
 
+    requests_list_mutex.acquire()
     for request in requests:
         ABORT_PING_CLIENT = False
-        if request.service != str (service):
+        if request.service != service or request.processing:
             continue
         
         # Server Might Have Failed and Client Aborted
-        print(request)
-        ping_client(request.client_address, False)
-        if ABORT_PING_CLIENT:
-            print("Client Died and the Request is Cancelled")
-            # Item should be deleted here 
-
-
-
-
-            
-            continue
+        if ENABLE_BACKUP:
+            ping_client(request.client_address, False)
+            if ABORT_PING_CLIENT:
+                print("Client Died and the Request is Cancelled")
+                print(request.client_address)
+                # Item should be deleted here 
+                continue
         
         # Ping Client
         ABORT_PING_CLIENT = False
@@ -111,7 +113,9 @@ def get_request(service):
         ping_client_thread.start()
 
         LOAD = LOAD + 1
-        return request.request_sequence, request.buffer, len(request.buffer)
+        requests_list_mutex.release()
+        
+        return request.request_sequence, request.buffer.encode("ascii"), len(request.buffer)
     return -1, [], -1
 
 
@@ -119,6 +123,7 @@ def send_reply(request_id, buffer, length):
     global JOIN_PING_CLIENT
     global ping_client_thread
 
+    requests_list_mutex.acquire()
     for request in requests[:]:
         if request_id != request.request_sequence:
             continue
@@ -131,9 +136,10 @@ def send_reply(request_id, buffer, length):
         JOIN_PING_CLIENT = True
         ping_client_thread.join()
 
+        print("SEND")
         print(request)
         requests.remove(request)
-
+    requests_list_mutex.release()
 
 def print_services():
     print(services)
@@ -163,22 +169,28 @@ def unicast_communication():
         data, client = unicast_fd.recvfrom(REQUEST_LENGTH) #ENABLE POLLING to kill thread
         data = data.decode('ascii')
         data = data.split(':')
-
-        if data[0] != "PING":
-            sequence = (data[0], client)
-            service = data[1]
-            buffer = data[2]
-            request = Request(request_sequence=REQUEST_SEQUENCE, client_sequence=sequence, client_address=client, service=service, buffer=buffer)
         
+        if data[0] != "PING":
+            sequence = (int.from_bytes(str.encode(data[0]), "big"), client)
+            service = int.from_bytes(str.encode(data[1]), "big")
+            buffer = str (data[2])
+            
+            request = Request(request_sequence=REQUEST_SEQUENCE, client_sequence=sequence, client_address=client, service=service, processing=False, buffer=buffer)
+            print(request)
+
+            requests_list_mutex.acquire()
             if request not in requests:
                 requests.append(request)
                 REQUEST_SEQUENCE = REQUEST_SEQUENCE + 1
-            
-                # Write List of Requests to File
-                backup_file = "{FILE_NAME}.bckp".format(FILE_NAME=UNICAST_PORT)
-                with open(backup_file, "wb") as file:
-                    pickle.dump(requests, file)
 
+                if ENABLE_BACKUP:
+                    # Write List of Requests to File
+                    backup_file = "{FILE_NAME}.bckp".format(FILE_NAME=UNICAST_PORT)
+                    with open(backup_file, "wb") as file:
+                        pickle.dump(requests, file)
+            
+            requests_list_mutex.release()
+            
             response = "ACK"
         else:
             service_id = int(data[1])
@@ -240,14 +252,14 @@ def api_init():
     SERVER_IP = sys.argv[1]
     UNICAST_PORT = int (sys.argv[2])
     LOAD = int (sys.argv[3]) #
-
-    try:
-        backup_file = "{FILE_NAME}.bckp".format(FILE_NAME=UNICAST_PORT)
-        with open(backup_file, "rb") as file:
-            requests =  pickle.load(file)
-            print(requests)
-    except:
-        pass
+    if ENABLE_BACKUP:
+        try:
+            backup_file = "{FILE_NAME}.bckp".format(FILE_NAME=UNICAST_PORT)
+            with open(backup_file, "rb") as file:
+                requests =  pickle.load(file)
+                print(requests)
+        except:
+            pass
 
     # Multicast Socket
     multicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)

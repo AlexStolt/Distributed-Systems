@@ -18,7 +18,7 @@ int unicast_socket_fd;
 int ping_server_socket_fd;
 char databuf[MESSAGE_LENGTH] = "Multicast test message lol!";
 int datalen = sizeof(databuf);
-int sequence = 0;
+int sequence = 1;
 poll_information_t multicast_poll_information, unicast_poll_information, keepalive_poll_information;
 bool ABORT_FLAG = false;
 bool JOIN_THREAD = false;
@@ -211,34 +211,35 @@ int multicast_discovery(int service_id, struct sockaddr_in *unicast_server_addre
 }
 
 void *ping_server(void *arguments){
-    char keepalive_request[MESSAGE_LENGTH];
-    char keepalive_response[MESSAGE_LENGTH];
+    char ping_server_request[MESSAGE_LENGTH];
+    char ping_server_response[MESSAGE_LENGTH];
     ping_arguments_t ping_arguments = *((ping_arguments_t *) arguments);
     struct sockaddr_in ping_server_address = (struct sockaddr_in) ping_arguments.unicast_ping_server_address;
     socklen_t length = sizeof(ping_server_address);
     int service_id = ping_arguments.service_id;
 
-    memset(keepalive_request, 0, MESSAGE_LENGTH * sizeof(char));
-    sprintf(keepalive_request, "PING:%d", service_id);
+
+    memset(ping_server_request, 0, MESSAGE_LENGTH * sizeof(char));
+    sprintf(ping_server_request, "PING:%d", service_id);
 
     for(int i = 0; i < TRIES; i++){
         if(JOIN_THREAD){
             return NULL;
         }
        
-        memset(keepalive_response, 0, MESSAGE_LENGTH * sizeof(char));
+        memset(ping_server_response, 0, MESSAGE_LENGTH * sizeof(char));
 
-        sendto(ping_server_socket_fd, keepalive_request, strlen(keepalive_request) * sizeof(char), 0, (struct sockaddr *) &ping_server_address, length);
+        sendto(ping_server_socket_fd, ping_server_request, strlen(ping_server_request) * sizeof(char), 0, (struct sockaddr *) &ping_server_address, length);
         if(!check_polling(&keepalive_poll_information, ping_server_socket_fd, TIMEOUT)){
             continue;
         }
 
-        if (recvfrom(ping_server_socket_fd, (void *) keepalive_response, MESSAGE_LENGTH, MSG_WAITALL, (struct sockaddr *) &ping_server_address, &length) < 0) {
+        if (recvfrom(ping_server_socket_fd, (void *) ping_server_response, MESSAGE_LENGTH, MSG_WAITALL, (struct sockaddr *) &ping_server_address, &length) < 0) {
             perror("recvfrom ack failed");
             exit(EXIT_FAILURE);
         }
 
-        if(!strcmp(keepalive_response, "ACK")) {
+        if(!strcmp(ping_server_response, "ACK")) {
             i = 0;
         }
     }
@@ -249,30 +250,45 @@ void *ping_server(void *arguments){
     return NULL;
 }
 
-int unicast_communication(int service_id, void *reqbuf,  void *rspbuf, struct sockaddr_in unicast_ping_server_address){
-    char unicast_response[MESSAGE_LENGTH];
-    char unicast_request[MESSAGE_LENGTH];
+int unicast_communication(int service_id, void *request_buffer, int request_length, void *rspbuf, struct sockaddr_in unicast_ping_server_address){
+    char unicast_ping_response[MESSAGE_LENGTH];
+    void *unicast_request;
     char unicast_ack[MESSAGE_LENGTH];
     char ping_response[MESSAGE_LENGTH] = "ACK";
     socklen_t length = sizeof(unicast_ping_server_address);
-    pthread_t keepalive_thread;
+    pthread_t ping_server_thread;
     ping_arguments_t ping_arguments;
-
+    char seperator[] = ":";
+    int service_id_to_network = htonl(service_id);
+    int sequence_to_network = htonl(sequence);
+    int unicast_request_size = request_length + (2 * sizeof(int)) + (2 * sizeof(char));
 
     ABORT_FLAG = false;
     JOIN_THREAD = false;
 
+    // Buffer to Send
+    unicast_request = (void *) malloc(unicast_request_size); 
+    if(!unicast_request){
+        exit(EXIT_FAILURE);
+    }
+    //Send unicast socket
+    //sprintf(unicast_request, "%d:%d:%s", sequence, service_id, (char *) request_buffer);
+
     //Initialize buffers
-    memset(unicast_response, 0, MESSAGE_LENGTH * sizeof(char));
-    memset(unicast_request, 0, MESSAGE_LENGTH * sizeof(char));
+    memset(unicast_request, 0, unicast_request_size * sizeof(char));
+    memset(unicast_ping_response, 0, MESSAGE_LENGTH * sizeof(char));
     memset(unicast_ack, 0, MESSAGE_LENGTH * sizeof(char));
 
+    // Set Request Header and Payload to Send
+    memcpy(unicast_request, &sequence_to_network, sizeof(int));
+    memcpy(unicast_request + sizeof(int), seperator, sizeof(char));
+    memcpy(unicast_request + sizeof(int) + sizeof(char), &service_id_to_network, sizeof(int));
+    memcpy(unicast_request + sizeof(int) + sizeof(char) + sizeof(int), seperator, sizeof(char));
+    memcpy(unicast_request + sizeof(int) + sizeof(char) + sizeof(int) + sizeof(char), request_buffer, request_length);
 
-    //Send unicast socket
-    sprintf(unicast_request, "%d:%d:%s", sequence, service_id, (char *) reqbuf);
-
+    
     for(int i = 0; i < TRIES; i++) {
-        sendto(unicast_socket_fd, unicast_request, strlen(unicast_request) * sizeof(char), 0, (struct sockaddr *) &unicast_ping_server_address, sizeof(unicast_ping_server_address));
+        sendto(unicast_socket_fd, unicast_request, request_length + 2 * sizeof(int) + 2 * sizeof(char), 0, (struct sockaddr *) &unicast_ping_server_address, sizeof(unicast_ping_server_address));
 
         if(!check_polling(&unicast_poll_information, unicast_socket_fd, TIMEOUT)){
             continue;
@@ -292,31 +308,36 @@ int unicast_communication(int service_id, void *reqbuf,  void *rspbuf, struct so
         return -1; // unicast request not ack from server
     }
 
+    printf("ACK Received %s\n", unicast_ack);
+    fflush(stdout);
     // Monitor server status (keepalive (ping))
     ping_arguments.unicast_ping_server_address = unicast_ping_server_address;
     ping_arguments.service_id = service_id;
-
-    pthread_create(&keepalive_thread, NULL, ping_server, (void *) &ping_arguments);
+    printf("%d ", ping_arguments.service_id );
+    fflush(stdout);
+    pthread_create(&ping_server_thread, NULL, ping_server, &ping_arguments);
     
+
     // Wait for response or late ACKs
     while(!ABORT_FLAG) {
-        memset(unicast_response, 0, sizeof(char) * MESSAGE_LENGTH);
+        memset(unicast_ping_response, 0, sizeof(char) * MESSAGE_LENGTH);
 
         if(!check_polling(&unicast_poll_information, unicast_socket_fd, TIMEOUT)){
             continue;
         }
 
         //Receive from server the answer
-        if (recvfrom(unicast_socket_fd, (void *) unicast_response, MESSAGE_LENGTH, MSG_WAITALL, (struct sockaddr *) &unicast_ping_server_address, &length) < 0) {
+        if (recvfrom(unicast_socket_fd, (void *) unicast_ping_response, MESSAGE_LENGTH, MSG_WAITALL, (struct sockaddr *) &unicast_ping_server_address, &length) < 0) {
             perror("recvfrom failed");
             exit(EXIT_FAILURE);
         }
-
+        //printf("%s\n", unicast_ping_response);
+        fflush(stdout);
         // ACKs that arrived with latency 
-        if(!strcmp(unicast_response, "ACK")) {
+        if(!strcmp(unicast_ping_response, "ACK")) {
             continue;
         }
-        else if(!strcmp(unicast_response, "PING")) {
+        else if(!strcmp(unicast_ping_response, "PING")) {
             // Send
             sendto(unicast_socket_fd, ping_response, strlen(ping_response) * sizeof(char), 0, (struct sockaddr *) &unicast_ping_server_address, sizeof(unicast_ping_server_address));
             continue;
@@ -331,13 +352,13 @@ int unicast_communication(int service_id, void *reqbuf,  void *rspbuf, struct so
 
     // Ping finishes here
     JOIN_THREAD = true;
-    pthread_join(keepalive_thread, NULL);
+    pthread_join(ping_server_thread, NULL);
     
     if(ABORT_FLAG) {
         return -2; // no ack from server in ping
     }
       
-    memccpy(rspbuf,(void *) unicast_response, 0, strlen(unicast_response) * sizeof(char));
+    memccpy(rspbuf,(void *) unicast_ping_response, 0, strlen(unicast_ping_response) * sizeof(char));
     sequence++;
 
     return 0;
@@ -364,7 +385,7 @@ int RequestReply (int service_id, void *reqbuf, int reqlen, void *rspbuf, int *r
     }
     
     // Unicast and Ping
-    unicast_status = unicast_communication(service_id, reqbuf, rspbuf, unicast_server_address);
+    unicast_status = unicast_communication(service_id, reqbuf, reqlen, rspbuf, unicast_server_address);
     if(unicast_status == -2) {
         printf("[ERROR]: No ping response\n");
         return -1;
