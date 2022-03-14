@@ -35,7 +35,6 @@ UNICAST_PORT = None
 
 multicast_thread = None
 unicast_thread = None
-ping_client_thread = None
 
 
 # File Descriptors (Sockets)
@@ -43,7 +42,7 @@ multicast_fd = None
 unicast_fd = None
 ping_client_socket_fd = None
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=False, order=True)
 class Request:
     # Header
     request_sequence: int
@@ -55,6 +54,9 @@ class Request:
     # Payload
     buffer: str
     
+    # Threading Related Information
+    ping_client_thread: Any
+
     
     def __eq__(self, other):
         return (self.client_sequence    ==  other.client_sequence   and \
@@ -84,7 +86,6 @@ def unregister(service):
 
 
 def get_request(service):
-    global ping_client_thread
     global JOIN_PING_CLIENT 
     global ABORT_PING_CLIENT
     global LOAD
@@ -98,6 +99,7 @@ def get_request(service):
         if request.service != service or request.processing:
             continue
         
+        request.processing = True
         # Server Might Have Failed and Client Aborted
         if ENABLE_BACKUP:
             ping_client(request.client_address, False)
@@ -109,19 +111,19 @@ def get_request(service):
         
         # Ping Client
         ABORT_PING_CLIENT = False
-        ping_client_thread = threading.Thread(target=ping_client, args=(request.client_address, True, ))
-        ping_client_thread.start()
+        request.ping_client_thread.start()
 
         LOAD = LOAD + 1
         requests_list_mutex.release()
         
         return request.request_sequence, request.buffer.encode("ascii"), len(request.buffer)
+    
+    requests_list_mutex.release()
     return -1, [], -1
 
 
 def send_reply(request_id, buffer, length):
     global JOIN_PING_CLIENT
-    global ping_client_thread
 
     requests_list_mutex.acquire()
     for request in requests[:]:
@@ -134,10 +136,8 @@ def send_reply(request_id, buffer, length):
             unicast_fd.sendto(buffer.encode('ascii'), request.client_address)
         
         JOIN_PING_CLIENT = True
-        ping_client_thread.join()
+        request.ping_client_thread.join()
 
-        print("SEND")
-        print(request)
         requests.remove(request)
     requests_list_mutex.release()
 
@@ -174,10 +174,17 @@ def unicast_communication():
             sequence = (int.from_bytes(str.encode(data[0]), "big"), client)
             service = int.from_bytes(str.encode(data[1]), "big")
             buffer = str (data[2])
-            
-            request = Request(request_sequence=REQUEST_SEQUENCE, client_sequence=sequence, client_address=client, service=service, processing=False, buffer=buffer)
-            print(request)
 
+            request = Request(
+                request_sequence = REQUEST_SEQUENCE, 
+                client_sequence = sequence, 
+                client_address = client, 
+                service = service, 
+                processing = False, 
+                ping_client_thread = threading.Thread(target=ping_client, args=(client, True, )),
+                buffer = buffer
+            )
+            
             requests_list_mutex.acquire()
             if request not in requests:
                 requests.append(request)
@@ -190,7 +197,6 @@ def unicast_communication():
                         pickle.dump(requests, file)
             
             requests_list_mutex.release()
-            
             response = "ACK"
         else:
             service_id = int(data[1])

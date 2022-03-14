@@ -308,13 +308,10 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
         return -1; // unicast request not ack from server
     }
 
-    printf("ACK Received %s\n", unicast_ack);
-    fflush(stdout);
     // Monitor server status (keepalive (ping))
     ping_arguments.unicast_ping_server_address = unicast_ping_server_address;
     ping_arguments.service_id = service_id;
-    printf("%d ", ping_arguments.service_id );
-    fflush(stdout);
+
     pthread_create(&ping_server_thread, NULL, ping_server, &ping_arguments);
     
 
@@ -331,8 +328,7 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
             perror("recvfrom failed");
             exit(EXIT_FAILURE);
         }
-        //printf("%s\n", unicast_ping_response);
-        fflush(stdout);
+        
         // ACKs that arrived with latency 
         if(!strcmp(unicast_ping_response, "ACK")) {
             continue;
