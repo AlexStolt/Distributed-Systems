@@ -18,7 +18,7 @@ int unicast_socket_fd;
 int ping_server_socket_fd;
 char databuf[MESSAGE_LENGTH] = "Multicast test message lol!";
 int datalen = sizeof(databuf);
-int sequence = 1;
+int sequence = 0;
 poll_information_t multicast_poll_information, unicast_poll_information, keepalive_poll_information;
 bool ABORT_FLAG = false;
 bool JOIN_THREAD = false;
@@ -275,7 +275,7 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
     //sprintf(unicast_request, "%d:%d:%s", sequence, service_id, (char *) request_buffer);
 
     //Initialize buffers
-    memset(unicast_request, 0, unicast_request_size * sizeof(char));
+    memset(unicast_request, 0, unicast_request_size);
     memset(unicast_ping_response, 0, MESSAGE_LENGTH * sizeof(char));
     memset(unicast_ack, 0, MESSAGE_LENGTH * sizeof(char));
 
@@ -289,7 +289,8 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
     
     for(int i = 0; i < TRIES; i++) {
         sendto(unicast_socket_fd, unicast_request, request_length + 2 * sizeof(int) + 2 * sizeof(char), 0, (struct sockaddr *) &unicast_ping_server_address, sizeof(unicast_ping_server_address));
-
+        
+        memset(unicast_ack, 0, MESSAGE_LENGTH * sizeof(char));
         if(!check_polling(&unicast_poll_information, unicast_socket_fd, TIMEOUT)){
             continue;
         }
@@ -301,6 +302,11 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
 
         if(!strcmp(unicast_ack, "ACK")) {
             break;
+        }
+        else if(!strcmp(unicast_ping_response, "PING")) {
+            // Send
+            i--;
+            sendto(unicast_socket_fd, ping_response, strlen(ping_response) * sizeof(char), 0, (struct sockaddr *) &unicast_ping_server_address, sizeof(unicast_ping_server_address));
         }
     }
 
@@ -339,7 +345,7 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
             continue;
         }
 
-        // send ack to server    
+        // send ack to server
     
         // Data was received
         break;
@@ -369,25 +375,25 @@ int RequestReply (int service_id, void *reqbuf, int reqlen, void *rspbuf, int *r
     // Multicast
     multicast_status = multicast_discovery(service_id, &unicast_server_address);
     if(multicast_status == -2){
-        printf("[ERROR]: No Available Servers Found\n");
+        printf("\033[0;31m[ERROR]: No Available Servers Found\n\033[0m");
         return -1;
     }
     else if(multicast_status == -1){
-        printf("[ERROR]: No Available Services Found\n");
+        printf("\033[0;31m[ERROR]: No Available Services Found\n\033[0m");
         return -1;
     }
     else {
-        printf("Server Information: %s at %d\n", inet_ntoa((struct in_addr) unicast_server_address.sin_addr), ntohs(unicast_server_address.sin_port));
+        printf("\033[0;33mServer Information: %s at %d\n\033[0m", inet_ntoa((struct in_addr) unicast_server_address.sin_addr), ntohs(unicast_server_address.sin_port));
     }
     
     // Unicast and Ping
     unicast_status = unicast_communication(service_id, reqbuf, reqlen, rspbuf, unicast_server_address);
     if(unicast_status == -2) {
-        printf("[ERROR]: No ping response\n");
+        printf("\033[0;31m[ERROR]: No ping response\n\033[0m");
         return -1;
     }
     else if(unicast_status == -1) {
-        printf("[ERROR]: Unicast server do not responce\n");
+        printf("\033[0;31m[ERROR]: Unicast server do not responce\n\033[0m");
         return -1;
     }
 

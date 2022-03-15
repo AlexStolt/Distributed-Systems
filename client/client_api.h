@@ -18,7 +18,7 @@
 #define MESSAGE_LENGTH 1024
 #define PFDS_SIZE 1
 #define TIMEOUT 1000
-#define TRIES 4
+#define TRIES 10
 #define MULTICAST_WINDOW 5
 
 void api_init();

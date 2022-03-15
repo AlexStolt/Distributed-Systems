@@ -7,7 +7,7 @@ WORKER_THREADS = 3
 def prime(services):
     while True:
         for service in services:
-            id, buffer, length = get_request(service)
+            id, buffer, length, flags = get_request(service)
             if id < 0:
                 continue
             number = int.from_bytes(buffer, "big")
@@ -20,6 +20,10 @@ def prime(services):
                 number_is_prime = False
                 break
             
+            time.sleep(20)
+            print(flags.get_abort())
+
+
             if number_is_prime:
                 response = 'Number {number}: Prime'.format(number=number)
             else:

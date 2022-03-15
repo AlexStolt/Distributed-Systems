@@ -21,11 +21,12 @@ int main(int argc, char const *argv[]) {
     number_of_primes = number_of_primes < MINIMUM_NUMBER_OF_PRIMES ? MINIMUM_NUMBER_OF_PRIMES : number_of_primes;
 
     for(int i = 0; i < number_of_primes; i++){
-        number = rand() % MAXIMUM_VALUE;
+        memset(rsvbuf, 0, MESSAGE_LENGTH * sizeof(char));
+        number = i + 100;//rand() % MAXIMUM_VALUE; 
         number_to_network = htonl(number); 
         printf("Prime to Calculate: %d\n", number);
         RequestReply(SERVICE, (void *) &number_to_network, sizeof(int), (void *) rsvbuf, NULL);
-        printf("%s\n", rsvbuf);
+        printf("\033[0;32m%s\n\033[0m", rsvbuf);
     }
 
 
