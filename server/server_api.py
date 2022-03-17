@@ -1,6 +1,6 @@
 from locale import atoi
 from ntpath import join
-from os import abort, pread
+import os
 from colorama import Fore, Back, Style
 import socket
 from sre_parse import State
@@ -12,13 +12,14 @@ import select
 from typing import Any
 from dataclasses import dataclass
 import pickle
-
+import binascii
 from simplejson import load
-
-ENABLE_BACKUP = False
+import ast
+ENABLE_BACKUP = True
 
 requests_list_mutex = threading.Lock()
 load_mutex = threading.Lock()
+file_mutex = threading.Lock()
 
 # Global Variables
 services = []
@@ -26,7 +27,7 @@ requests  = []
 
 
 TIMEOUT = 1
-TRIES = 10
+TRIES = 4
 REQUEST_LENGTH = 1024
 LOAD = 0
 REQUEST_SEQUENCE = 0
@@ -34,12 +35,14 @@ REQUEST_SEQUENCE = 0
 MULTICAST_GROUP = '224.1.1.1'
 MULTICAST_PORT = 8000
 
-SERVER_IP = None
-UNICAST_PORT = None
+
+
 
 multicast_thread = None
 unicast_thread = None
 
+BACKUP_FILE = None
+BACKUP_SOCKET = False
 
 # File Descriptors (Sockets)
 multicast_fd = None
@@ -62,6 +65,9 @@ class Request:
     ping_client_thread: Any
     flags: Any
 
+    def activate_processing(self):
+        self.processing = True
+
     
     def __eq__(self, other):
         return (self.client_sequence    ==  other.client_sequence   and \
@@ -69,11 +75,6 @@ class Request:
                 self.service            ==  other.service           and \
                 self.buffer             ==  other.buffer)
     
-    def __ne__(self, other):
-        return (self.client_sequence    !=  other.client_sequence   and \
-                self.client_address     !=  other.client_address    and \
-                self.service            !=  other.service           and \
-                self.buffer             !=  other.buffer)
 
 
 class Flags:
@@ -108,8 +109,21 @@ def unregister(service):
     except:
         return
 
+def backup_delete_request(request):
+    file_mutex.acquire()
+    delete_request_data = f'{request.request_sequence}:{request.client_sequence}:{request.client_address}:{request.service}:{request.buffer}'
+    
+    with open(BACKUP_FILE, "r") as file:
+        lines = file.readlines()
+        print(f"\n-----------\n{lines}\n{delete_request_data}\n-----------\n")
+    
+    if lines:
+        with open(BACKUP_FILE, "w+") as file:
+            for line in lines:
+                if line.strip("\n") != delete_request_data:
+                    file.write(line)
 
-
+    file_mutex.release()
 
 def get_request(service):
     global LOAD
@@ -121,20 +135,28 @@ def get_request(service):
         
         request.flags.set_join(False)
         request.flags.set_abort(False)
-        
         request.processing = True
-        
+
+        # print(requests)
+        # exit(1)
         # Server Might Have Failed and Client Aborted
-        if ENABLE_BACKUP:
-            ping_client(request.client_address, False)
-            if request.flags.get_abort():
-                print("\033[91m[ERROR]: Client", request.client_address, " Died and the Request is Cancelled\033[0;0m")
-                print(request.client_address)
-                # Item should be deleted here 
-                continue
+        # if ENABLE_BACKUP:
+            
+        #     requests_list_mutex.release()
+        #     # ping_client(request.client_address, False, request.flags)
+        #     requests_list_mutex.acquire()
+
+        #     if request.flags.get_abort():
+        #         print("\033[91m[ERROR]: Client", request.client_address, " Died and the Request is Cancelled\033[0;0m")
+        #         print(request.client_address)
+                
+        #         # Item should be deleted from request list and backup file
+        #         requests.remove(request)
+        #         backup_delete_request(request)
+        #         continue
         
         # Ping Client
-        request.ping_client_thread = threading.Thread(target=ping_client, args=(request.client_address, True, request.flags, ))
+        request.ping_client_thread = threading.Thread(target=ping_client, args=(request.client_address, True, request.flags, TRIES, ))
         request.ping_client_thread.start()
 
         load_mutex.acquire()
@@ -151,19 +173,24 @@ def get_request(service):
 
 def send_reply(request_id, buffer, length):
     global LOAD
+    global BACKUP_SOCKET
 
     requests_list_mutex.acquire()
     for request in requests[:]:
         if request_id != request.request_sequence:
             continue
-
+        # print(request_id)
         buffer = buffer[:length]
 
-        
         if not request.flags.get_abort():
             unicast_fd.sendto(buffer.encode('ascii'), request.client_address)
+            if ENABLE_BACKUP:
+                print("Delete Fuck: ", request) 
+                backup_delete_request(request)
         else:
-            print("\033[91m[ERROR] Client",request.client_address , "did not respond\033[0;0m")
+            print("\033[91m[ERROR] Client",request.client_address , "did not Respond\033[0;0m")
+
+        
 
         request.flags.set_join(True)
         request.ping_client_thread.join()
@@ -172,7 +199,11 @@ def send_reply(request_id, buffer, length):
         LOAD = LOAD - 1
         load_mutex.release()
 
-        requests.remove(request)
+        # Delete Request from List and File
+        #requests.remove(request)
+        
+                
+
     requests_list_mutex.release()
 
 def print_services():
@@ -182,6 +213,8 @@ def print_services():
 
 def multicast_discovery():
     global multicast_fd
+    global unicast_fd
+    global BACKUP_SOCKET
 
     while True:
         buffer, client = multicast_fd.recvfrom(REQUEST_LENGTH)
@@ -191,28 +224,43 @@ def multicast_discovery():
             response = 'NACK'
         else:
             load_mutex.acquire()
-            response = 'ACK:{LOAD}:{SERVER_IP}:{UNICAST_PORT}'.format(LOAD=LOAD, SERVER_IP=SERVER_IP, UNICAST_PORT=UNICAST_PORT)
+            response = 'ACK:{LOAD}'.format(LOAD=LOAD)
             load_mutex.release()
     
-        multicast_fd.sendto(response.encode(), client)
+        unicast_fd.sendto(response.encode(), client)
+        if BACKUP_SOCKET:
+            line = f'127.0.0.1:{unicast_fd.getsockname()[1]}\n'
+            if ENABLE_BACKUP:
+                file_mutex.acquire()
+                with open(BACKUP_FILE, 'w+') as file:
+                    content = file.read()
+                    file.seek(0, 0)
+                    file.write(line.rstrip('\r\n') + '\n' + content)
+                BACKUP_SOCKET = False
+                file_mutex.release()
 
 
 def unicast_communication():
     global REQUEST_SEQUENCE
     global unicast_fd
-    
+    global BACKUP_FILE
+    global ENABLE_BACKUP
+
     while True:
         readable, writable, errors = select.select([unicast_fd], [], [], TIMEOUT)
-
+        
         for socket in readable:
             data, client = socket.recvfrom(REQUEST_LENGTH)
-            data = data.decode('ascii')
-            data = data.split(':')
+            #data = data.decode('ascii')
+            data = data.split(b':')
             
-            if data[0] != "PING":
-                sequence = (int.from_bytes(str.encode(data[0]), "big"), client)
-                service = int.from_bytes(str.encode(data[1]), "big")
-                buffer = str (data[2]).encode('ascii')
+            
+            if data[0] != b'PING':
+                requests_list_mutex.acquire()
+                sequence = (int.from_bytes(data[0], "big"), client)
+                service = int.from_bytes(data[1], "big")
+                buffer = data[2]
+
                 
                 request = Request(
                     request_sequence = REQUEST_SEQUENCE, 
@@ -225,19 +273,24 @@ def unicast_communication():
                     flags = Flags(False, False)
                 )
                 
-                requests_list_mutex.acquire()
-                print(sequence)
-                print("HEllo")
-                if request not in requests: # This part fails
+                request_in_requests = False
+                for request_iterator in requests:    
+                    if request_iterator.client_sequence != request.client_sequence:
+                        continue
+                    request_in_requests = True
+                
+                if not request_in_requests:
                     requests.append(request)
+                    
+                    if ENABLE_BACKUP:
+                        file_mutex.acquire()
+                        # Write Request to File
+                        with open(BACKUP_FILE, "a+") as file:
+                            file.writelines(f'{REQUEST_SEQUENCE}:{sequence}:{client}:{service}:{buffer}\n')
+                        file_mutex.release()
+                
                     REQUEST_SEQUENCE = REQUEST_SEQUENCE + 1
 
-                    if ENABLE_BACKUP:
-                        # Write List of Requests to File
-                        backup_file = "{FILE_NAME}.bckp".format(FILE_NAME=UNICAST_PORT)
-                        with open(backup_file, "wb") as file:
-                            pickle.dump(requests, file)
-                
                 requests_list_mutex.release()
                 response = "ACK"
             else:
@@ -250,12 +303,12 @@ def unicast_communication():
             # Send acknowledgement back to client
             socket.sendto(response.encode('ascii'), client)
             
-def ping_client(client_address, repeat, flags):
+def ping_client(client_address, repeat, flags, tries):
     global ping_client_socket_fd
     request = "PING"
 
     i = 0
-    while i < TRIES:
+    while i < tries:
         if flags.get_join():
             return
 
@@ -285,8 +338,9 @@ def ping_client(client_address, repeat, flags):
 
 
 def api_init():
-    global SERVER_IP 
-    global UNICAST_PORT
+    global REQUEST_SEQUENCE
+    global BACKUP_FILE
+    global BACKUP_SOCKET
     global multicast_thread
     global unicast_thread
     global multicast_fd
@@ -294,22 +348,12 @@ def api_init():
     global ping_client_socket_fd
     global requests
 
-    if len(sys.argv) != 3:
-        print("python3 <EXECUTABLE> <UNICAST IP> <UNICAST PORT>")
-        exit(0)
+    if len(sys.argv) != 2:
+        print("python3 <EXECUTABLE> <BACKUP FILE>")
+        exit(-1)
 
 
-    SERVER_IP = sys.argv[1]
-    UNICAST_PORT = int (sys.argv[2])
-
-    if ENABLE_BACKUP:
-        try:
-            backup_file = "{FILE_NAME}.bckp".format(FILE_NAME=UNICAST_PORT)
-            with open(backup_file, "rb") as file:
-                requests =  pickle.load(file)
-                print(requests)
-        except:
-            pass
+    BACKUP_FILE = sys.argv[1]
 
     # Multicast Socket
     multicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -322,7 +366,44 @@ def api_init():
     # Unicast Socket
     unicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     unicast_fd.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    unicast_fd.bind((SERVER_IP, UNICAST_PORT))
+    if ENABLE_BACKUP:
+        try:
+            if os.stat(BACKUP_FILE).st_size != 0:
+                with open(BACKUP_FILE, "r") as file:
+                    address = file.readline()
+                    address = address.split(':')
+                    unicast_address = (address[0], int (address[1].replace('\n', '')))
+                    # Server has failed so previously used port must be used
+                    unicast_fd.bind(unicast_address)
+
+                    # Server reads pending requests
+                    lines = file.readlines()
+                    
+                    for line in lines:
+                        fields = line.split(':')
+                        largest_sequence = int (lines[-1].split(':')[0])
+                        REQUEST_SEQUENCE = largest_sequence + 1
+        
+                        request = Request(
+                            request_sequence = int(fields[0]), 
+                            client_sequence = eval(fields[1]), 
+                            client_address = eval(fields[2]), 
+                            service = int (fields[3]), 
+                            processing = False, 
+                            ping_client_thread = None,
+                            buffer = ast.literal_eval(fields[4]),
+                            flags = Flags(False, False)
+                        )
+                        
+                        if request not in requests:
+                            # Append Request 
+                            requests.append(request)
+
+            else:
+                BACKUP_SOCKET = True
+        except:
+            BACKUP_SOCKET = True
+
     unicast_fd.setblocking(False)
 
     # Keepalive Socket

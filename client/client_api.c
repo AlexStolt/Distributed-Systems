@@ -134,7 +134,7 @@ void api_init() {
 
 int multicast_discovery(int service_id, struct sockaddr_in *unicast_server_address){
     struct sockaddr_in multicast_server_address;
-    socklen_t length = sizeof(multicast_server_address);
+    socklen_t length = sizeof(struct sockaddr_in);
     char multicast_response[MESSAGE_LENGTH];
     char multicast_request[MESSAGE_LENGTH];
     const char delimiter[2] = ":";
@@ -147,7 +147,7 @@ int multicast_discovery(int service_id, struct sockaddr_in *unicast_server_addre
     memset(multicast_response, 0, MESSAGE_LENGTH * sizeof(char));
     memset(multicast_request, 0, MESSAGE_LENGTH * sizeof(char));
     waiting_multicast_responses_time = time(NULL) + MULTICAST_WINDOW;
-    unicast_server_address->sin_family = AF_INET;
+    //unicast_server_address->sin_family = AF_INET;
     
     // Request Header and Payload
     sprintf(multicast_request, "%d", service_id);
@@ -162,11 +162,10 @@ int multicast_discovery(int service_id, struct sockaddr_in *unicast_server_addre
                 break;
             }
             //Receive from servers multicast connection
-            if (recvfrom(multicast_socket_fd, (void *) multicast_response, MESSAGE_LENGTH, MSG_WAITALL, (struct sockaddr *) &multicast_server_address, &length) < 0) {
+            if (recvfrom(multicast_socket_fd, (void *) multicast_response, MESSAGE_LENGTH, MSG_WAITALL, (struct sockaddr *) unicast_server_address, &length) < 0) {
                 perror("recvfrom failed");
                 exit(EXIT_FAILURE);
             }
-            
             // Messages were received by at least by one server 
             retry = false;
 
@@ -182,11 +181,11 @@ int multicast_discovery(int service_id, struct sockaddr_in *unicast_server_addre
             if(atoi(token) < server_load) {
                 server_load = atoi(token);
                 
-                token = strtok(NULL, delimiter);
-                unicast_server_address->sin_addr.s_addr = inet_addr(token);
+                // token = strtok(NULL, delimiter);
+                // unicast_server_address->sin_addr.s_addr = inet_addr(token);
                 
-                token = strtok(NULL, delimiter);
-                unicast_server_address->sin_port = htons(atoi(token));
+                // token = strtok(NULL, delimiter);
+                // unicast_server_address->sin_port = htons(atoi(token));
             }
         }
         if(server_load < INT_MAX){
@@ -250,11 +249,12 @@ void *ping_server(void *arguments){
     return NULL;
 }
 
-int unicast_communication(int service_id, void *request_buffer, int request_length, void *rspbuf, struct sockaddr_in unicast_ping_server_address){
+int unicast_communication(int service_id, void *request_buffer, int request_length, void *rspbuf, struct sockaddr_in unicast_server_address){
     char unicast_ping_response[MESSAGE_LENGTH];
     void *unicast_request;
     char unicast_ack[MESSAGE_LENGTH];
     char ping_response[MESSAGE_LENGTH] = "ACK";
+    struct sockaddr_in unicast_ping_server_address;
     socklen_t length = sizeof(unicast_ping_server_address);
     pthread_t ping_server_thread;
     ping_arguments_t ping_arguments;
@@ -262,6 +262,7 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
     int service_id_to_network = htonl(service_id);
     int sequence_to_network = htonl(sequence);
     int unicast_request_size = request_length + (2 * sizeof(int)) + (2 * sizeof(char));
+    
 
     ABORT_FLAG = false;
     JOIN_THREAD = false;
@@ -288,8 +289,8 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
 
     
     for(int i = 0; i < TRIES; i++) {
-        sendto(unicast_socket_fd, unicast_request, request_length + 2 * sizeof(int) + 2 * sizeof(char), 0, (struct sockaddr *) &unicast_ping_server_address, sizeof(unicast_ping_server_address));
-        
+        sendto(unicast_socket_fd, unicast_request, request_length + 2 * sizeof(int) + 2 * sizeof(char), 0, (struct sockaddr *) &unicast_server_address, sizeof(unicast_server_address));
+        //printf("\033[0;33mClient send Unicast packet on Server: %s at %d\n\033[0m", inet_ntoa((struct in_addr) unicast_server_address.sin_addr), ntohs(unicast_server_address.sin_port));
         memset(unicast_ack, 0, MESSAGE_LENGTH * sizeof(char));
         if(!check_polling(&unicast_poll_information, unicast_socket_fd, TIMEOUT)){
             continue;
@@ -308,6 +309,12 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
             i--;
             sendto(unicast_socket_fd, ping_response, strlen(ping_response) * sizeof(char), 0, (struct sockaddr *) &unicast_ping_server_address, sizeof(unicast_ping_server_address));
         }
+        else {
+            // Data Might have arrived if server restarted
+            // memcpy(rspbuf, unicast_ack, MESSAGE_LENGTH * sizeof(char));
+            // return 0;
+        }
+        
     }
 
     if(!(*unicast_ack)) {
@@ -346,7 +353,7 @@ int unicast_communication(int service_id, void *request_buffer, int request_leng
         }
 
         // send ack to server
-    
+
         // Data was received
         break;
     
@@ -383,17 +390,17 @@ int RequestReply (int service_id, void *reqbuf, int reqlen, void *rspbuf, int *r
         return -1;
     }
     else {
-        printf("\033[0;33mServer Information: %s at %d\n\033[0m", inet_ntoa((struct in_addr) unicast_server_address.sin_addr), ntohs(unicast_server_address.sin_port));
+        //printf("\033[0;33mServer Information: %s at %d\n\033[0m", inet_ntoa((struct in_addr) unicast_server_address.sin_addr), ntohs(unicast_server_address.sin_port));
     }
     
     // Unicast and Ping
     unicast_status = unicast_communication(service_id, reqbuf, reqlen, rspbuf, unicast_server_address);
     if(unicast_status == -2) {
-        printf("\033[0;31m[ERROR]: No ping response\n\033[0m");
+        printf("\033[0;31m[ERROR]: No Ping Response\n\033[0m");
         return -1;
     }
     else if(unicast_status == -1) {
-        printf("\033[0;31m[ERROR]: Unicast server do not responce\n\033[0m");
+        printf("\033[0;31m[ERROR]: Unicast Server did not Respond\n\033[0m");
         return -1;
     }
 
