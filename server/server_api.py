@@ -115,7 +115,7 @@ def backup_delete_request(request):
     
     with open(BACKUP_FILE, "r") as file:
         lines = file.readlines()
-        print(f"\n-----------\n{lines}\n{delete_request_data}\n-----------\n")
+        #print(f"\n-----------\n{lines}\n{delete_request_data}\n-----------\n")
     
     if lines:
         with open(BACKUP_FILE, "w+") as file:
@@ -132,6 +132,7 @@ def get_request(service):
     for request in requests:
         if request.service != service or request.processing:
             continue
+        
         
         request.flags.set_join(False)
         request.flags.set_abort(False)
@@ -182,18 +183,20 @@ def send_reply(request_id, buffer, length):
         # print(request_id)
         buffer = buffer[:length]
 
+        request.flags.set_join(True)
+        request.ping_client_thread.join()
+        
         if not request.flags.get_abort():
             unicast_fd.sendto(buffer.encode('ascii'), request.client_address)
             if ENABLE_BACKUP:
-                print("Delete Fuck: ", request) 
+                #print("Delete Fuck: ", request) 
                 backup_delete_request(request)
         else:
             print("\033[91m[ERROR] Client",request.client_address , "did not Respond\033[0;0m")
-
+            backup_delete_request(request)
         
 
-        request.flags.set_join(True)
-        request.ping_client_thread.join()
+        
 
         load_mutex.acquire()
         LOAD = LOAD - 1
@@ -215,29 +218,61 @@ def multicast_discovery():
     global multicast_fd
     global unicast_fd
     global BACKUP_SOCKET
+    global LOAD
+
+    service = None
+    foreign_load = None
+   
 
     while True:
-        buffer, client = multicast_fd.recvfrom(REQUEST_LENGTH)
-        service = int(buffer.decode()[:-1])
+        leader = True
+        client = None
         
-        if service not in services:
-            response = 'NACK'
-        else:
+        for _ in range(TRIES):
+            readable, writable, errors = select.select([multicast_fd], [multicast_fd], [], TIMEOUT)
+            if multicast_fd in readable:
+                buffer, receiver = multicast_fd.recvfrom(REQUEST_LENGTH)
+                try:
+                    service = int(buffer.decode()[:-1])
+                    client = receiver
+                    if service not in services:
+                        response = 'NACK'
+                        unicast_fd.sendto(response.encode(), client)
+                        break
+                except:
+                    foreign_load = int (buffer.decode().split(':')[1])
+                    if  LOAD > foreign_load:
+                        leader = False
+                
+                
+                if service and service in services:
+                    load_mutex.acquire()
+                    load_response = 'LOAD:{LOAD}'.format(LOAD=LOAD)
+                    load_mutex.release()
+                    
+                    if multicast_fd in writable:
+                        if leader:
+                            multicast_fd.sendto(load_response.encode(), (MULTICAST_GROUP, MULTICAST_PORT))
+
+
+        if leader and client:
+            
             load_mutex.acquire()
-            response = 'ACK:{LOAD}'.format(LOAD=LOAD)
+            response = f'ACK:{LOAD}'
+            print(f'Leader:{LOAD}')
             load_mutex.release()
-    
-        unicast_fd.sendto(response.encode(), client)
-        if BACKUP_SOCKET:
-            line = f'127.0.0.1:{unicast_fd.getsockname()[1]}\n'
-            if ENABLE_BACKUP:
-                file_mutex.acquire()
-                with open(BACKUP_FILE, 'w+') as file:
-                    content = file.read()
-                    file.seek(0, 0)
-                    file.write(line.rstrip('\r\n') + '\n' + content)
-                BACKUP_SOCKET = False
-                file_mutex.release()
+            unicast_fd.sendto(response.encode(), client) 
+            
+            if BACKUP_SOCKET:
+                line = f'127.0.0.1:{unicast_fd.getsockname()[1]}\n'
+                if ENABLE_BACKUP:
+                    file_mutex.acquire()
+                    with open(BACKUP_FILE, 'w+') as file:
+                        content = file.read()
+                        file.seek(0, 0)
+                        file.write(line.rstrip('\r\n') + '\n' + content)
+                    BACKUP_SOCKET = False
+                    file_mutex.release()
 
 
 def unicast_communication():
@@ -306,7 +341,9 @@ def unicast_communication():
 def ping_client(client_address, repeat, flags, tries):
     global ping_client_socket_fd
     request = "PING"
-
+    
+    flags.set_abort(True)
+    
     i = 0
     while i < tries:
         if flags.get_join():
@@ -316,19 +353,21 @@ def ping_client(client_address, repeat, flags, tries):
         
         readable, writable, errors = select.select([ping_client_socket_fd], [], [], TIMEOUT)
 
-        for socket in readable:
+        if ping_client_socket_fd in readable:
             try:
-                data, client = socket.recvfrom(REQUEST_LENGTH)
+                data, client = ping_client_socket_fd.recvfrom(REQUEST_LENGTH)
             except:
-                break
+                continue
             data = data.decode('ascii')
             
             if data and data == "ACK":
                 if not repeat:
                     return
+                flags.set_abort(False)
                 i = 0
-                break
+                continue
 
+        flags.set_abort(True)
         i = i + 1
 
     # Client Aborted (Notify Application with this Flag)
@@ -362,6 +401,7 @@ def api_init():
 
     mreq = struct.pack("4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
     multicast_fd.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    multicast_fd.setblocking(False)
 
     # Unicast Socket
     unicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -398,7 +438,6 @@ def api_init():
                         if request not in requests:
                             # Append Request 
                             requests.append(request)
-
             else:
                 BACKUP_SOCKET = True
         except:

@@ -10,8 +10,9 @@ def prime(services):
             id, buffer, length, flags = get_request(service)
             if id < 0:
                 continue
+            
             number = int.from_bytes(buffer, "big")
-            print("Primitive Test is Running for Number:", number)
+            print(f"\033[96mPrimitive Test is Running for Number: {number}\033[00m")
             
             number_is_prime = True
             for i in range(2, number):
@@ -20,7 +21,7 @@ def prime(services):
                 number_is_prime = False
                 break
             
-            # time.sleep(10)
+            time.sleep(10)
             # print(flags.get_abort())
 
 
