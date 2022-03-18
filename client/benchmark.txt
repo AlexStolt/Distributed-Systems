@@ -1,0 +1,12 @@
+Number 50000: Not Prime, in time: 0.000438
+Number 50001: Not Prime, in time: 0.000361
+Number 50002: Not Prime, in time: 0.000338
+Number 50003: Not Prime, in time: 0.000423
+Number 50004: Not Prime, in time: 0.000308
+Number 50005: Not Prime, in time: 0.000272
+Number 50006: Not Prime, in time: 0.000291
+Number 50007: Not Prime, in time: 0.000184
+Number 50008: Not Prime, in time: 0.000329
+Number 50009: Not Prime, in time: 0.000316
+Number 50010: Not Prime, in time: 0.000358
+Number 50011: Not Prime, in time: 0.000306

@@ -6,3 +6,11 @@ client_api.o: client_api.c
 	gcc client_api.c -Wall -g -c -o client_api.o
 clean: 
 	rm *.o
+
+benchmark:
+	./client &
+	./client &
+	./client &
+	./client &
+	./client &
+	./client
