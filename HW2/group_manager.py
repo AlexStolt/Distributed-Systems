@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from ast import literal_eval as make_tuple
 from tokenize import group
 
+from attr import field
+
 PACKET_LENGTH = 1024
 VIRTUAL_FILE_DESCRIPTOR = 0
 
@@ -27,7 +29,7 @@ class ProcessInformation:
   virtual_file_descriptor: int
 
   # TCP Information
-  tcp_address: tuple
+  tcp_group_socket_address: tuple
 
   # UDP Information
   udp_address: tuple
@@ -44,90 +46,91 @@ def multicast_socket_init():
   # udp_multicast_fd.setblocking(False)
 
   # Unicast Socket for Process Group Leave
-  tcp_unicast_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-  tcp_unicast_fd.bind((TCP_UNICAST_HOST, TCP_UNICAST_PORT))
+  tcp_leave_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  tcp_leave_fd.bind((TCP_UNICAST_HOST, TCP_UNICAST_PORT))
   # tcp_unicast_fd.bind(('', 0))
   # listen 
   # accept
 
 
 
-  return tcp_unicast_fd, udp_multicast_fd
+  return tcp_leave_fd, udp_multicast_fd
 
 
 if __name__ == "__main__":
-  tcp_unicast_fd, udp_multicast_fd = multicast_socket_init()
+  tcp_leave_fd, udp_multicast_fd = multicast_socket_init()
 
   while True:
-    request, process_address = udp_multicast_fd.recvfrom(PACKET_LENGTH)
+    request, udp_process_address = udp_multicast_fd.recvfrom(PACKET_LENGTH)
     request = request.decode()
     
     fields = request.split(':')
-    
+
     # Process Leaves Group
     if fields[0] != 'JOIN':
-      pass
-    
-
-    # Process Joins Group
+      # Process Might Want to Leave
+      #
+      #
+      continue
 
     # TCP Related Information
-    tcp_information = make_tuple(fields[1])
+    tcp_vfd_pi_socket_address = make_tuple(fields[1])
+    tcp_group_socket_address = make_tuple(fields[2])
     
 
     # General Information
-    group_name = fields[2]
-    process_id = fields[3]
+    group_name = fields[3]
+    process_id = fields[4]
 
-    
-
-    process_information = ProcessInformation(
-      group_name = group_name,
-      process_id = process_id,
-      virtual_file_descriptor = VIRTUAL_FILE_DESCRIPTOR,
-      tcp_address = tcp_information,
-      udp_address = process_address,
-    )
-    
     # Check for Duplicate Pair of Group Name and Process ID
     process_exists = False
     for process in connected_processes:
-      if process.group_name != process_information.group_name:
-        continue
-      if process.process_id != process_information.process_id:
+      if process.group_name != group_name or process.process_id != process_id:
         continue
       process_exists = True
       
 
     if process_exists:
-      udp_multicast_fd.sendto("NACK".encode(), process_address)
+      udp_multicast_fd.sendto("NACK".encode(), udp_process_address)
       continue
-
-    connected_processes.append(process_information)
-    udp_multicast_fd.sendto(f"ACK:{tcp_unicast_fd.getsockname()}".encode(), process_address)
     
 
-    #Sent to other information for the new
-    processes_information_response = f"VFD_PI:{process_information.virtual_file_descriptor}" # Virtual File Descriptor and Processes Information
+    # Process is Connected to Group Manager
+    connected_processes.append(ProcessInformation(
+      group_name = group_name,
+      process_id = process_id,
+      virtual_file_descriptor = VIRTUAL_FILE_DESCRIPTOR,
+      tcp_group_socket_address = tcp_group_socket_address,
+      udp_address = udp_process_address,
+    ))
+
+    udp_multicast_fd.sendto(f"ACK:{tcp_leave_fd.getsockname()}".encode(), udp_process_address)
+    
+
+    # Virtual File Descriptor and Processes Information
+    processes_information_response = f"VFD_PI:{connected_processes[-1].virtual_file_descriptor}" 
    
-    # Notify Servers About the Member that wants to Join
-    for process in connected_processes:
-      if process.group_name != process_information.group_name:
+    # Notify and Update Processes about the Member that Joined
+    for process in connected_processes[:-1]:
+      if process.group_name != connected_processes[-1].group_name:
         continue
-      if process.process_id != process_information.process_id:
-        # TCP Unicast Socket for Each Server EXCEPT the New Member
-        tcp_communication_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tcp_communication_fd.connect(process.tcp_address)
-        tcp_communication_fd.sendall(f"PIJR:{process_information.group_name}:{process_information.process_id}:{process_address}".encode()) # Process Information Join Request
-        tcp_communication_fd.close()
+      
+      # TCP Unicast Socket for Each Server EXCEPT the Currently Joined Member
+      tcp_communication_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      tcp_communication_fd.connect(process.tcp_group_socket_address)
+      
+      # Process Information Join Request
+      tcp_communication_fd.sendall(f"PIJR:{connected_processes[-1].group_name}:{connected_processes[-1].process_id}:{udp_process_address}".encode()) 
+      tcp_communication_fd.close()
+      
       
       # Processes Accumulated Information String
-      processes_information_response = processes_information_response + ":" + f"{process.udp_address}"
+      processes_information_response = processes_information_response + ":" + f"{process.process_id}-{process.udp_address}"
     
 
     # Send Servers Information to Currently Subscribed Member
     tcp_communication_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tcp_communication_fd.connect(process_information.tcp_address)
+    tcp_communication_fd.connect(tcp_vfd_pi_socket_address)
     tcp_communication_fd.sendall(processes_information_response.encode())
     tcp_communication_fd.close()
     

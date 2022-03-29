@@ -15,8 +15,9 @@ if __name__ == '__main__':
 
 
 
-
-  fd = grp_join('sports', ''.join(random.choice(string.ascii_lowercase) for i in range(3)))
+  
+  fd1 = grp_join('sports', ''.join(random.choice(string.ascii_lowercase) for i in range(10)))
+  fd2 = grp_join('ski', ''.join(random.choice(string.ascii_lowercase) for i in range(10)))
   time.sleep(100)
 
   
