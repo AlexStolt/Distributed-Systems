@@ -17,7 +17,18 @@ if __name__ == '__main__':
 
   
   fd1 = grp_join('sports', ''.join(random.choice(string.ascii_lowercase) for i in range(10)))
-  fd2 = grp_join('ski', ''.join(random.choice(string.ascii_lowercase) for i in range(10)))
+  # fd2 = grp_join('ski', ''.join(random.choice(string.ascii_lowercase) for i in range(10)))
+  message = ''.join(random.choice(string.ascii_lowercase) for i in range(10))
+  # time.sleep(2)
+  grp_send(fd1, message, len(message), 0)
+  time.sleep(4)
+  
+  while True:
+    message, length = grp_recv(fd1, 0)
+    if length < 0:
+      continue
+    print(message, length)
+  # grp_send(fd1, message, len(message), 0)
   time.sleep(100)
 
   

@@ -4,9 +4,7 @@ import string
 import struct
 from dataclasses import dataclass
 from ast import literal_eval as make_tuple
-from tokenize import group
 
-from attr import field
 
 PACKET_LENGTH = 1024
 VIRTUAL_FILE_DESCRIPTOR = 0
@@ -121,6 +119,7 @@ if __name__ == "__main__":
       
       # Process Information Join Request
       tcp_communication_fd.sendall(f"PIJR:{connected_processes[-1].group_name}:{connected_processes[-1].process_id}:{udp_process_address}".encode()) 
+      data = tcp_communication_fd.recv(PACKET_LENGTH)
       tcp_communication_fd.close()
       
       
