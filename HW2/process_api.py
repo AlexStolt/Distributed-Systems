@@ -1,3 +1,4 @@
+import random
 import socket
 import string
 import struct
@@ -9,11 +10,11 @@ from dataclasses import dataclass
 
 IP = None
 NETWORK_LATENCY = 2
-NETWORK_STABILITY = 50
+NETWORK_RELIABILITY =  100
 
 PACKET_LENGTH = 1024
-MULTICAST_TRIES = 4
-MAXIMUM_MULTICAST_DELAY = 4
+TRIES = 4
+RTT = 4
 TIMEOUT = 1
 
 UDP_MULTICAST_GROUP = '224.1.1.1'
@@ -22,7 +23,8 @@ UDP_MULTICAST_PORT = 8000
 # Sockets
 tcp_gi_fd = None      # Group Information
 tcp_vfd_pi_fd = None  # Virtual File Descriptor and Processes Information
-udp_unicast_fd = None         # UDP Multicast and Unicast
+udp_unicast_receiver_fd = None 
+udp_unicast_sender_fd = None
 tcp_pi_fd = None
 
 connected_processes = []
@@ -52,14 +54,20 @@ class ServerInformation:
 def api_init(HOST_IP, TCP_UNICAST_PORT):
   global IP
   global tcp_gi_fd
-  global udp_unicast_fd
+  global udp_unicast_receiver_fd
+  global udp_unicast_sender_fd
   global tcp_pi_fd
   
   IP = HOST_IP
   
   # UDP Unicast Socket (Listener)
-  udp_unicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-  udp_unicast_fd.bind((IP, 0))
+  udp_unicast_receiver_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+  udp_unicast_receiver_fd.bind((IP, 0))
+  
+  # UDP Unicast Socket (Sender)
+  udp_unicast_sender_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+  udp_unicast_sender_fd.bind((IP, 0))
+  udp_unicast_sender_fd.setblocking(False)
   
   # TCP Socket (Listener)
   tcp_pi_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -107,12 +115,12 @@ def multicast_reliable_communication(group_name, process_id, tcp_vfd_pi_address,
   
   
   i = 0
-  while i < MULTICAST_TRIES:
+  while i < TRIES:
     # Send to UDP Multicast
     start = time.time()
     udp_multicast_fd.sendto(join_request.encode(), (UDP_MULTICAST_GROUP, UDP_MULTICAST_PORT))
 
-    while time.time() - start < MAXIMUM_MULTICAST_DELAY:
+    while time.time() - start < RTT:
       readable, writable, errors = select.select([udp_multicast_fd], [], [], TIMEOUT)
       
       if udp_multicast_fd in readable:
@@ -133,6 +141,23 @@ def multicast_reliable_communication(group_name, process_id, tcp_vfd_pi_address,
   return -1, None
 
 
+def unicast_reliable_communication(udp_unicast_destination_address, payload):
+  
+  while True:
+    # Send to UDP Unicast
+    udp_unicast_sender_fd.sendto(payload.encode(), udp_unicast_destination_address)
+    print('Loop')
+    readable, _, _ = select.select([udp_unicast_sender_fd], [], [], None)
+    
+    if len(readable) > 0:
+      print(len(readable))
+      try:
+        response, group_manager = udp_unicast_sender_fd.recvfrom(PACKET_LENGTH)
+        response = response.decode()
+        print(response)
+        return
+      except:
+        break
 
 def tcp_listener():
   
@@ -145,7 +170,7 @@ def tcp_listener():
     
       group_name, process_id, process_udp_unicast_address = fields
 
-
+      
       for process in connected_processes:
         if process.group_name != group_name:
           continue
@@ -170,12 +195,20 @@ def tcp_listener():
 def udp_listener():
   while True:
     
-    message, process = udp_unicast_fd.recvfrom(PACKET_LENGTH)
+    message, source_process_address = udp_unicast_receiver_fd.recvfrom(PACKET_LENGTH)
     message = message.decode()
     
     process_id, group_name, payload, receive_sequence = message.split(':')
     
-    #print('*',payload)
+    # Simulating Packet Losses
+    if random.randint(1, 100) > NETWORK_RELIABILITY:
+      #print('Packet was Lost')
+      print(source_process_address, udp_unicast_sender_fd.getsockname())
+      continue
+    
+    # Notify Sender that Data was Received
+    udp_unicast_receiver_fd.sendto('ACK'.encode(), source_process_address)
+    #print('ACK was send')
     for process in connected_processes:
       if process.group_name != group_name:
         continue
@@ -193,6 +226,7 @@ def udp_listener():
           'payload': payload
         })
         # print(group_process['pending_message_buffer'])
+      
       
       process.group_processes_information_list_mutex.release()
       process.receive_block_semaphore.release()
@@ -216,7 +250,7 @@ def grp_join(group_name, process_id):
     process_id, 
     tcp_vfd_pi_fd.getsockname(),
     tcp_pi_fd.getsockname(),
-    udp_unicast_fd.getsockname()
+    udp_unicast_receiver_fd.getsockname()
   )
   
   if status == -1:
@@ -269,7 +303,7 @@ def grp_join(group_name, process_id):
       # Insert Self on the Begining of the List
       connected_processes[-1].group_processes_information.insert(0, {
         'process_id': process_id,
-        'process_udp_address': udp_unicast_fd.getsockname(),
+        'process_udp_address': udp_unicast_receiver_fd.getsockname(),
         'send_sequence': 0,
         'receive_sequence': 0,
         'pending_message_buffer': []
@@ -299,14 +333,21 @@ def grp_send(file_descriptor, payload, payload_length, causal_total):
       
       for group_process in process.group_processes_information:
         # SLEEP
-      
-        udp_unicast_fd.sendto(f"{message}:{group_process['send_sequence']}".encode(), group_process['process_udp_address'])
+        
+        # if random.randint(0, 100) < NETWORK_RELIABILITY:
+          
+        
+        # Reliably Send Data to Processes
+        unicast_reliable_communication(group_process['process_udp_address'], f"{message}:{group_process['send_sequence']}")
+        
         # WAIT FOR ACK
         
         # ACK WAS RECEIVED
         group_process['send_sequence'] = group_process['send_sequence'] + 1
       
-      process.group_processes_information_list_mutex.release()  
+      process.group_processes_information_list_mutex.release() 
+  
+ 
         
         
 def grp_recv(file_descriptor, blocking):
@@ -338,6 +379,7 @@ def grp_recv(file_descriptor, blocking):
     if not blocking:
       break
     
+    # Bloc Execution
     for process in connected_processes:
       if process.virtual_file_descriptor != file_descriptor:
         continue
