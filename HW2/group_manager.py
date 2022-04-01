@@ -27,18 +27,18 @@ class ProcessInformation:
   virtual_file_descriptor: int
 
   # TCP Information
-  tcp_group_socket_address: tuple
+  tcp_pi_address: tuple
+   
+      
 
   # UDP Information
-  udp_address: tuple
+  udp_unicast_address: tuple
 
 
 def multicast_socket_init():
   # UDP Multicast Socket
   udp_multicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-  udp_multicast_fd.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
   udp_multicast_fd.bind((UDP_MULTICAST_GROUP, UDP_MULTICAST_PORT))
-
   memory_request = struct.pack("4sl", socket.inet_aton(UDP_MULTICAST_GROUP), socket.INADDR_ANY)
   udp_multicast_fd.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, memory_request)
   # udp_multicast_fd.setblocking(False)
@@ -57,28 +57,22 @@ def multicast_socket_init():
 
 if __name__ == "__main__":
   tcp_leave_fd, udp_multicast_fd = multicast_socket_init()
-
+  
   while True:
     request, udp_process_address = udp_multicast_fd.recvfrom(PACKET_LENGTH)
+    # print(f"JOIN: {udp_process_address}")
     request = request.decode()
-    
     fields = request.split(':')
 
-    # Process Leaves Group
-    if fields[0] != 'JOIN':
-      # Process Might Want to Leave
-      #
-      #
-      continue
-
-    # TCP Related Information
-    tcp_vfd_pi_socket_address = make_tuple(fields[1])
-    tcp_group_socket_address = make_tuple(fields[2])
+    # Socket Related Information
+    tcp_vfd_pi_address = make_tuple(fields[0])
+    tcp_pi_address = make_tuple(fields[1])
+    udp_unicast_address = make_tuple(fields[2])
     
-
     # General Information
-    group_name = fields[3]
+    group_name = fields[3] 
     process_id = fields[4]
+    
 
     # Check for Duplicate Pair of Group Name and Process ID
     process_exists = False
@@ -98,15 +92,16 @@ if __name__ == "__main__":
       group_name = group_name,
       process_id = process_id,
       virtual_file_descriptor = VIRTUAL_FILE_DESCRIPTOR,
-      tcp_group_socket_address = tcp_group_socket_address,
-      udp_address = udp_process_address,
+      tcp_pi_address = tcp_pi_address,
+      udp_unicast_address = udp_unicast_address,
     ))
+    
 
-    udp_multicast_fd.sendto(f"ACK:{tcp_leave_fd.getsockname()}".encode(), udp_process_address)
+    udp_multicast_fd.sendto(f'ACK:{tcp_leave_fd.getsockname()}'.encode(), udp_process_address)
     
 
     # Virtual File Descriptor and Processes Information
-    processes_information_response = f"VFD_PI:{connected_processes[-1].virtual_file_descriptor}" 
+    processes_information_response = f'{connected_processes[-1].virtual_file_descriptor}' 
    
     # Notify and Update Processes about the Member that Joined
     for process in connected_processes[:-1]:
@@ -115,21 +110,21 @@ if __name__ == "__main__":
       
       # TCP Unicast Socket for Each Server EXCEPT the Currently Joined Member
       tcp_communication_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      tcp_communication_fd.connect(process.tcp_group_socket_address)
-      
-      # Process Information Join Request
-      tcp_communication_fd.sendall(f"PIJR:{connected_processes[-1].group_name}:{connected_processes[-1].process_id}:{udp_process_address}".encode()) 
+      tcp_communication_fd.connect(process.tcp_pi_address)
+      tcp_communication_fd.sendall(f"{connected_processes[-1].group_name}:{connected_processes[-1].process_id}:{udp_unicast_address}".encode()) 
       data = tcp_communication_fd.recv(PACKET_LENGTH)
       tcp_communication_fd.close()
       
       
       # Processes Accumulated Information String
-      processes_information_response = processes_information_response + ":" + f"{process.process_id}-{process.udp_address}"
+      processes_information_response = processes_information_response + ":" + f"{process.process_id}-{process.udp_unicast_address}"
     
 
     # Send Servers Information to Currently Subscribed Member
     tcp_communication_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tcp_communication_fd.connect(tcp_vfd_pi_socket_address)
+    tcp_communication_fd.connect(tcp_vfd_pi_address)
     tcp_communication_fd.sendall(processes_information_response.encode())
     tcp_communication_fd.close()
+    
+    VIRTUAL_FILE_DESCRIPTOR = VIRTUAL_FILE_DESCRIPTOR + 1
     
