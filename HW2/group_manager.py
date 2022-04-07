@@ -1,9 +1,14 @@
 from concurrent.futures import process
+from pickle import FALSE
 import socket
 import string
 import struct
+import threading
 from dataclasses import dataclass
 from ast import literal_eval as make_tuple
+
+from process_api import tcp_listener
+
 
 
 PACKET_LENGTH = 1024
@@ -47,16 +52,49 @@ def multicast_socket_init():
   tcp_leave_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   tcp_leave_fd.bind((TCP_UNICAST_HOST, TCP_UNICAST_PORT))
   # tcp_unicast_fd.bind(('', 0))
-  # listen 
+  tcp_leave_fd.listen() 
   # accept
 
+  tcp_listener_thread = threading.Thread(target=tcp_listener, args=(tcp_leave_fd, ))
+  tcp_listener_thread.start()
+    
 
+  return tcp_leave_fd, udp_multicast_fd, tcp_listener_thread
 
-  return tcp_leave_fd, udp_multicast_fd
+def tcp_listener(tcp_leave_fd):
+  while True:
+    process_fd, process_address = tcp_leave_fd.accept()
+    with process_fd:
+      data = process_fd.recv(PACKET_LENGTH)
+      data = data.decode()
+      fields = data.split(':')
+      virtual_file_descriptor, group_name, process_id = fields
+      
+      #Send to the others of the group message that someone is leaving to update their lists
+      for process in connected_processes:
+        if process.group_name == group_name and process.virtual_file_descriptor != int (virtual_file_descriptor):
+          print(process.process_id)
+          tcp_communication_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          tcp_communication_fd.connect(process.tcp_pi_address)
+          tcp_communication_fd.sendall(f"LEAVE:{group_name}:{process_id}".encode()) 
+          data = tcp_communication_fd.recv(PACKET_LENGTH)
+          tcp_communication_fd.close()
+        
+      ###send ack to looser
+      process_fd.sendall("GO_THE_FUCK_AWAY".encode())
+      
+      #Remove the pussy
+      for process in connected_processes[:]:
+        if process.virtual_file_descriptor == virtual_file_descriptor:
+          connected_processes.remove(process)
+          break
 
+      print(f'<Success> Remove from group {group_name} the {process_id}')
 
 if __name__ == "__main__":
-  tcp_leave_fd, udp_multicast_fd = multicast_socket_init()
+  tcp_leave_fd, udp_multicast_fd, tcp_listener_thread = multicast_socket_init()
+  
+  
   
   while True:
     request, udp_process_address = udp_multicast_fd.recvfrom(PACKET_LENGTH)
@@ -111,7 +149,7 @@ if __name__ == "__main__":
       # TCP Unicast Socket for Each Server EXCEPT the Currently Joined Member
       tcp_communication_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
       tcp_communication_fd.connect(process.tcp_pi_address)
-      tcp_communication_fd.sendall(f"{connected_processes[-1].group_name}:{connected_processes[-1].process_id}:{udp_unicast_address}".encode()) 
+      tcp_communication_fd.sendall(f"JOIN:{connected_processes[-1].group_name}:{connected_processes[-1].process_id}:{udp_unicast_address}".encode()) 
       data = tcp_communication_fd.recv(PACKET_LENGTH)
       tcp_communication_fd.close()
       
@@ -128,3 +166,5 @@ if __name__ == "__main__":
     
     VIRTUAL_FILE_DESCRIPTOR = VIRTUAL_FILE_DESCRIPTOR + 1
     
+    
+  
