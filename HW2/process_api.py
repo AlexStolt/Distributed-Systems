@@ -1,4 +1,3 @@
-from concurrent.futures import thread
 import random
 import socket
 import string
@@ -16,7 +15,7 @@ process_priority = random.randint(0,100) # !!! THIS MUST CHANGE
 
 IP = None
 NETWORK_LATENCY = 1
-NETWORK_RELIABILITY =  100
+NETWORK_RELIABILITY =  96
 DISPLAY_HISTORY = False
 EXIT = False
 SHOW_ERRORS = True
@@ -254,9 +253,7 @@ def tcp_listener():
             'leave': False,
             'pending_message_buffer': []
           })
-          
-          # print(process.connected_processes[-1])
-          #print(len(process.connected_processes))
+        
           group_manager_fd.sendall("ACK".encode())
           process.connected_processes_mutex.release()
           break
@@ -276,7 +273,6 @@ def tcp_listener():
             if len(group_process['pending_message_buffer']) > 0:
               group_process['leave'] = True
             else:
-              print(f"{group_process['process_id']} has removed")
               process.connected_processes.remove(group_process)
             
             group_manager_fd.sendall("ACK".encode())
@@ -299,12 +295,10 @@ def inserts_listener():
     if NETWORK_LATENCY > 0:
       time.sleep(NETWORK_LATENCY)
       received_request = PENDING_INSERTS.pop(random.randint(0, len(PENDING_INSERTS) - 1))
-      #print(received_request)
     else:
       # Get Received Data
       received_request = PENDING_INSERTS.pop()
       
-    # print(received_request)
     header = received_request[0]
     process_id = received_request[1]
     group_name = received_request[2]
@@ -339,7 +333,6 @@ def inserts_listener():
               if message['total_causal_sequence'] != f'{dependency_sequence}:{dependency_priority}' or dependency_payload != message['payload']:
                 continue
               dependency_satisfied = True
-              # print(message['total_causal_sequence'], f'{dependency_sequence}:{dependency_priority}', dependency_payload, message['payload'])
             
             # Check if Message Already Received by Application
             if not dependency_satisfied:
@@ -347,11 +340,9 @@ def inserts_listener():
                 if message['total_causal_sequence'] != f'{dependency_sequence}:{dependency_priority}' or dependency_payload != message['payload']:
                   continue
                 dependency_satisfied = True
-                # print(message['total_causal_sequence'], f'{dependency_sequence}:{dependency_priority}', dependency_payload != message['payload'])
             
             if dependency_satisfied:
               break
-          # print(dependency_satisfied)
           # Satisfy Unsatisfied Dependencies
           for group_process in process.connected_processes:
             if group_process['process_id'] != process_id:
@@ -373,7 +364,6 @@ def inserts_listener():
                 'dependencies': virtual_dependencies[:],
               })
               
-              # print(process.process_sequence)
               process.process_sequence = process.process_sequence + 1
               
             # Add Virtual Dependency for Message
@@ -411,7 +401,6 @@ def inserts_listener():
         # Send Proposal Back to Process and Update Self
         if process.process_id != group_process['process_id']:
           # Send Proposal
-          # print('Sending', f'PROPOSAL:{process.group_name}:{unstable_sequence}:{process.process_sequence}:{process.process_priority}')
           unicast_reliable_communication(
             process.udp_unicast_sender_fd, 
             group_process['process_udp_address'], 
@@ -431,7 +420,6 @@ def proposals_listener():
       continue
     received_request = PENDING_PROPOSALS.get()
     header, group_name, unstable_sequence, process_sequence, process_priority = received_request
-    print(received_request)
     for process in group_information:
       if process.group_name != group_name:
         continue
@@ -444,7 +432,6 @@ def proposals_listener():
         
         # Waiting for Proposals
         if len(pending_message['proposals_list']) != pending_message['expected_proposals']:
-          print(len(pending_message['proposals_list']), pending_message['expected_proposals'])
           break
         
         # All Proposals Arrived
@@ -471,13 +458,11 @@ def proposals_listener():
             )
           else:
             # Feedback Loop
-            print('Proposal for', unstable_sequence)
             for message in group_process['pending_message_buffer']:
               
               if int (unstable_sequence) != int (message['unstable_sequence']):
                 continue
               message['total_causal_sequence'] = f'{largest_sequence}:{largest_priority}'
-            # print('--', group_process['pending_message_buffer'])
             process.receive_block_semaphore.release()
         process.connected_processes_mutex.release()
       
@@ -490,10 +475,10 @@ def updates_listener():
     
     if PENDING_UPDATES.empty():
       continue
+
     received_request = PENDING_UPDATES.get()
-    print(received_request)
     header, process_id, group_name, unstable_sequence, best_sequence, best_priority = received_request
-    # print(received_request)
+
     for process in group_information:
       if process.group_name != group_name:
         continue
@@ -528,13 +513,11 @@ def udp_listener():
     
     # Simulating Packet Losses
     if random.randint(1, 100) > NETWORK_RELIABILITY:
-      # print("\033[91mDroping Packet\033[00m")
       continue
     
     # Notify Sender that Data was Received
     udp_unicast_receiver_fd.sendto('ACK'.encode(), source_process_address)
     
-    #print("Send ACK")
     if fields[0] == "INSERT":
       if fields not in PENDING_INSERTS:
         PENDING_INSERTS.append(fields)
@@ -734,13 +717,11 @@ def tc_minimum_sequence_priority_message(process):
   deliver_to_application_message = None
   group_process_reference = None
   
-  # print('**', process.process_sequence, process.connected_processes)
   for group_process in process.connected_processes:
     for message in group_process['pending_message_buffer']:
       if message['ignore_message']:
         continue
       if not message['total_causal_sequence']:
-        print(group_process['process_id'], message['unstable_sequence'])
         return None, None
 
   
@@ -825,7 +806,6 @@ def grp_recv(file_descriptor, blocking, causal_total):
         
       
       process.connected_processes_mutex.release()
-      # print(deliver_to_application_message['total_causal_sequence'])
       
       return group_process_reference['process_id'], deliver_to_application_message['payload'], len(deliver_to_application_message['payload'])
  
@@ -839,7 +819,6 @@ def grp_recv(file_descriptor, blocking, causal_total):
         continue
       
       for _ in range(process.receive_block_semaphore._value + 1):
-        # print(process.receive_block_semaphore._value)
         process.receive_block_semaphore.acquire()
       break
   

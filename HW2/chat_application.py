@@ -1,4 +1,3 @@
-from time import sleep
 from process_api import *
 import sys
 import random
@@ -22,7 +21,6 @@ def sender_application(fd):
   
 
 def receiver_application(block, fd, iterations):
-  # time.sleep(20)
   #Wait to start 10 seconds  
   if not block:
     while True:
@@ -85,7 +83,7 @@ if __name__ == '__main__':
       ))
       
     # Open a Group
-    else:
+    elif data[0] == "i":
       if data[1] != " " or data[-1] == "":
         print("\033[91mWrong Input!\033[00m")
         continue
@@ -104,48 +102,49 @@ if __name__ == '__main__':
       if i >= len(groups):
         print("\033[91mYou haven' t join this group!\033[00m")
         continue
-    
-    while True:
-      print(f"\033[96m<<<<<----{group_name}---->>>>>")
-      print(f'id: {id}')
-      print("\033[93mType: <s> <message>, to send a message.\033[00m")
-      print("\033[93mType: <r> <0 or 1> (fifo or total casual) <0 or 1> (non blocking or blocking), to receive a message.\033[00m")
-      print("\033[93mType: <l>, to leave from this group.\033[00m")
-      print("\033[93mType: <b>, to go back.\033[00m")
       
-      input_buffer = input("Type: ")
-      
-      #go back or leave a group
-      if input_buffer[0] == "l" or input_buffer[0] == "b":
-        if input_buffer[0] == "l":
-          for process in groups[:]:
-            if process.group_name != group_name:
-              continue
-              
-            if not grp_leave(fd):
-              print(f'<SUCCESS> Leave team {process.group_name}')
-              groups.remove(process)
-              break
-        break  
+    if data[0] == "j" or data[0] == "i":
+      while True:
+        print(f"\033[96m<<<<<----{group_name}---->>>>>")
+        print(f'id: {id}')
+        print("\033[93mType: <s> <message>, to send a message.\033[00m")
+        print("\033[93mType: <r> <0 or 1> (fifo or total casual) <0 or 1> (non blocking or blocking), to receive a message.\033[00m")
+        print("\033[93mType: <l>, to leave from this group.\033[00m")
+        print("\033[93mType: <b>, to go back.\033[00m")
         
-      # Send message
-      elif input_buffer[0] == "s":
-        if input_buffer[1] != " ":
-          print("\033[91mWrong Input!\033[00m")
-          continue
-      
-        grp_send(fd, input_buffer[2:], len(input_buffer[2:]))
+        input_buffer = input("Type: ")
         
-      # Receive message
-      elif input_buffer[0] == "r":
-        if input_buffer[1] != " " or input_buffer[3] != " ":
-          print("\033[91mWrong Input!\033[00m")
-          continue
-        source, message, length = grp_recv(fd, int(input_buffer[-1]), int(input_buffer[-3]))
-        if length < 0:
-          print(f'\033[91mNo Available Messages\033[00m')
-        else:
-          print(f'\033[92m{source}: {message}\033[00m')
+        #go back or leave a group
+        if input_buffer[0] == "l" or input_buffer[0] == "b":
+          if input_buffer[0] == "l":
+            for process in groups[:]:
+              if process.group_name != group_name:
+                continue
+                
+              if not grp_leave(fd):
+                print(f'<SUCCESS> Leave team {process.group_name}')
+                groups.remove(process)
+                break
+          break  
+          
+        # Send message
+        elif input_buffer[0] == "s":
+          if input_buffer[1] != " ":
+            print("\033[91mWrong Input!\033[00m")
+            continue
+        
+          grp_send(fd, input_buffer[2:], len(input_buffer[2:]))
+          
+        # Receive message
+        elif input_buffer[0] == "r":
+          if input_buffer[1] != " " or input_buffer[3] != " ":
+            print("\033[91mWrong Input!\033[00m")
+            continue
+          source, message, length = grp_recv(fd, int(input_buffer[-1]), int(input_buffer[-3]))
+          if length < 0:
+            print(f'\033[91mNo Available Messages\033[00m')
+          else:
+            print(f'\033[92m{source}: {message}\033[00m')
         
   api_destroy()
 
