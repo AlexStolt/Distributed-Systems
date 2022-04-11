@@ -1,12 +1,10 @@
-from concurrent.futures import process
-from pickle import FALSE
 import socket
 import string
 import struct
 import threading
 from dataclasses import dataclass
 from ast import literal_eval as make_tuple
-
+import sys
 from process_api import tcp_listener
 
 
@@ -18,9 +16,7 @@ UDP_MULTICAST_GROUP = '224.1.1.1'
 UDP_MULTICAST_PORT = 8000
 
 
-TCP_UNICAST_HOST = "127.0.0.1"
-TCP_UNICAST_PORT = 8080
-
+TCP_UNICAST_HOST = None
 
 connected_processes = []
 
@@ -91,6 +87,14 @@ def tcp_listener(tcp_leave_fd):
       print(f'<Success> Remove from group {group_name} the {process_id}')
 
 if __name__ == "__main__":
+  if len(sys.argv) != 2:
+    print("python3 <EXECUTABLE> <IP>")
+    exit(-1)
+
+  TCP_UNICAST_HOST = sys.argv[1]
+
+
+
   tcp_leave_fd, udp_multicast_fd, tcp_listener_thread = multicast_socket_init()
   
   

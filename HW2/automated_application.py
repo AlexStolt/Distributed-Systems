@@ -11,10 +11,11 @@ TOTAL_CAUSAL = True
 
 def sender_application(fd, name, iterations):
 
+  sleep(10)
   for iteration in range(iterations):
     message = f'{name} at {iteration}'
     grp_send(fd, message, len(message))
-    sleep(1)
+    sleep(2)
   
 
 def receiver_application(fd):
@@ -38,7 +39,7 @@ if __name__ == '__main__':
   
   name = f'{random.randint(1, 1000)}'
   group = '2'
-  iterations = 10
+  iterations = 40
   # Join Group
   fd = grp_join(group_name=group, process_id=name)
    
