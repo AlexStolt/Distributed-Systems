@@ -50,7 +50,7 @@ def multicast_socket_init():
 
   # Unicast Socket for Process Group Leave
   tcp_leave_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-  tcp_leave_fd.bind((TCP_UNICAST_HOST, TCP_UNICAST_PORT))
+  tcp_leave_fd.bind((TCP_UNICAST_HOST, 0))
   # tcp_unicast_fd.bind(('', 0))
   tcp_leave_fd.listen() 
   # accept
@@ -73,17 +73,16 @@ def tcp_listener(tcp_leave_fd):
       #Send to the others of the group message that someone is leaving to update their lists
       for process in connected_processes:
         if process.group_name == group_name and process.virtual_file_descriptor != int (virtual_file_descriptor):
-          print(process.process_id)
           tcp_communication_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
           tcp_communication_fd.connect(process.tcp_pi_address)
           tcp_communication_fd.sendall(f"LEAVE:{group_name}:{process_id}".encode()) 
           data = tcp_communication_fd.recv(PACKET_LENGTH)
           tcp_communication_fd.close()
         
-      ###send ack to looser
-      process_fd.sendall("GO_THE_FUCK_AWAY".encode())
+      ###Send ack
+      process_fd.sendall("LEAVE".encode())
       
-      #Remove the pussy
+      #Remove process
       for process in connected_processes[:]:
         if process.virtual_file_descriptor == virtual_file_descriptor:
           connected_processes.remove(process)
@@ -98,7 +97,6 @@ if __name__ == "__main__":
   
   while True:
     request, udp_process_address = udp_multicast_fd.recvfrom(PACKET_LENGTH)
-    # print(f"JOIN: {udp_process_address}")
     request = request.decode()
     fields = request.split(':')
 
@@ -134,6 +132,7 @@ if __name__ == "__main__":
       udp_unicast_address = udp_unicast_address,
     ))
     
+    print(f'<Success> Join in group {group_name} the {process_id}')
 
     udp_multicast_fd.sendto(f'ACK:{tcp_leave_fd.getsockname()}'.encode(), udp_process_address)
     
