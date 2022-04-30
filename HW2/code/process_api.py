@@ -818,7 +818,7 @@ def grp_recv(file_descriptor, blocking, causal_total):
       if process.virtual_file_descriptor != file_descriptor:
         continue
       
-      for _ in range(process.receive_block_semaphore._value + 1):
+      for _ in range(process.receive_block_semaphore._value):
         process.receive_block_semaphore.acquire()
       break
   
