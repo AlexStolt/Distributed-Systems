@@ -1,113 +1,35 @@
 #include "nfs.h"
 
 
-requests_list_t *requests_list_init(){
-  requests_list_t *requests_list;
-
-  requests_list = (requests_list_t *) malloc(sizeof(requests_list_t));
-  if(!requests_list){
-    exit(EXIT_FAILURE);
-  }
-  
-  requests_list->head = NULL;
-  requests_list->tail = NULL;
-  requests_list->length = 0;
-
-  if(pthread_mutex_init(&requests_list->list_mutex, NULL) != 0){
-    exit(EXIT_FAILURE);
-  }
-
-  if(sem_init(&requests_list->block_semaphore, 0, 0) != 0){
-    exit(EXIT_FAILURE);
-  }
-
-  return requests_list;
-}
-
-
-void append_request(requests_list_t *requests_list, request_t *request){
-  pthread_mutex_lock(&requests_list->list_mutex);
-  
-  if(!requests_list->head || !requests_list->tail){
-    requests_list->head = request;
-    requests_list->tail = request;
-  }
-
-  requests_list->tail->next = request;
-  request->next = requests_list->head;
-  requests_list->tail = request;
-  requests_list->length++;
-
-  sem_post(&requests_list->block_semaphore);
-  pthread_mutex_unlock(&requests_list->list_mutex);
-}
-
-
-request_t *pop_request(requests_list_t *requests_list){
-  request_t *popped_request;
-
-  sem_wait(&requests_list->block_semaphore);
-  pthread_mutex_lock(&requests_list->list_mutex);
-
-  popped_request = requests_list->head;
-  if(requests_list->length < 2){
-    requests_list->head = NULL;
-    requests_list->tail = NULL;
-  }
-  else {
-    requests_list->head = requests_list->head->next;
-    requests_list->tail->next = requests_list->head;
-  }
-  
-  requests_list->length--;
-
-  pthread_mutex_unlock(&requests_list->list_mutex);
-
-  return popped_request;
-}
-
-
-void print_requests(requests_list_t *requests_list){
-  request_t *current;
-
-  for(current = requests_list->head; current != requests_list->tail; current = current->next){
-    printf("%d:%s", current->data_length, current->data);
-  }
-
-  printf("%d:%s", current->data_length, current->data);
-}
-
-
-void print_address(struct sockaddr *address){
-  struct sockaddr_in *address_in;
-  char ip[INET_ADDRSTRLEN];
-
-  address_in = (struct sockaddr_in *) address;
-  inet_ntop(AF_INET, &(address_in->sin_addr), ip, INET_ADDRSTRLEN);
-  printf("%s:%d\n", ip, ntohs(address_in->sin_port));
-}
-
-
 void *udp_requests_listener(void *arguments){
-  request_t *request;
+  char received_request[SIZE];
+  int received_request_length = -1;
 
+  request_t *request;
+  
   while (1) {
     request = (request_t *) malloc(sizeof(request_t));
     if(!request){
       exit(EXIT_FAILURE);
     }
-
-    memset(request->data, 0, SIZE * sizeof(char));
+    
+    memset(received_request, 0, SIZE * sizeof(char));  
     memset(&request->source, 0, sizeof(struct sockaddr));
     memset(&request->address_length, 0, sizeof(socklen_t));
-
     request->address_length = sizeof(struct sockaddr);
-    request->data_length = recvfrom(unicast_socket_fd, request->data, SIZE * sizeof(char), 0, &request->source, &request->address_length);
-    if(request->data_length < 0){
+
+
+    // Receive Data
+    received_request_length = recvfrom(unicast_socket_fd, received_request, SIZE * sizeof(char), 0, &request->source, &request->address_length);
+    if(received_request_length < 0){
       continue;
     }
 
-    // print_address(&request->source);
+    // Parse Request and Break it to Fields
+    request->fields = parse_request(received_request, &request->fields_length);
+    if(!request->fields){
+      continue;
+    }
 
     append_request(requests_list, request);
   }
@@ -168,41 +90,56 @@ void *udp_requests_handler(void *arguments){
   char *file_path;
   int flags;
   int file_id;
-  char response[SIZE];
+  char file_id_string[SIZE]; 
+  char response_fields[SIZE][SIZE];
+  int fields_length;
+  char *serialized_response;
+  int response_length;
+
+
 
 
   while (1){
-    
+    // Select a Pending Request
     selected_request = pop_request(requests_list);
-    memset(response, 0, SIZE * sizeof(char));
-
-    // printf("%s", selected_request->data);
-    // fflush(stdout);
-
-    request_type = strtok(selected_request->data, ":");
     
+#ifdef DEBUG
+    print_request(selected_request);
+#endif
+
+    request_type = selected_request->fields[0].field; 
     if(!strcmp(request_type, "LOOKUP_REQ")){
-      flags = atoi(strtok(NULL, ":"));
-      file_path = strtok(NULL, "");
- 
+      file_path = selected_request->fields[1].field;
+      flags = atoi(selected_request->fields[2].field);
+
       file_id = lookup_handler(file_path, flags);
+
+      // Set Response
       if(file_id < 0){
-       strcpy(response, "LOOKUP_RES:NACK"); 
+        strcpy(response_fields[0], "LOOKUP_RES");
+        strcpy(response_fields[1], "NACK");
+        fields_length = 2;
       }
       else {
-        sprintf(response, "LOOKUP_RES%sACK%s%s%s%d", SEPERATOR, SEPERATOR, file_path, SEPERATOR, file_id);
+        strcpy(response_fields[0], "LOOKUP_RES");
+        strcpy(response_fields[1], "ACK");
+        strcpy(response_fields[2], file_path);
+        
+        sprintf(file_id_string, "%d", file_id);
+        strcpy(response_fields[3], file_id_string);
+        fields_length = 4;
       }
+
+      // Serialize Response from Fields
+      serialized_response = serialize_request(response_fields, fields_length, &response_length);
       
       // Send Response
-      sendto(unicast_socket_fd, response, strlen(response) * sizeof(char), 0, &selected_request->source, selected_request->address_length);
-      printf("Sending %s %ld\n", response, strlen(response));
-    
+      sendto(unicast_socket_fd, serialized_response, response_length * sizeof(char), 0, &selected_request->source, selected_request->address_length);
+    }
+    else if(!strcmp(request_type, "READ_REQ")){
+
     }
 
-
-   
-  
-  
   }
 }
 

@@ -1,13 +1,4 @@
-from concurrent.futures import thread
-from ctypes.wintypes import SIZE
-import random
-import socket
-import threading
-import time
-import sys
-from collections import deque
-from enum import Enum
-
+from classes import *
 
 # File Operations
 O_RDONLY  =   0
@@ -18,153 +9,87 @@ O_EXCL    =   200
 O_TRUNC   =   1000
 
 
+THREADS = 4
+
 PACKET_LENGTH = 1024
-SEPERATOR = b"1010AAAA1010"
-
-class Cache:
-  def __init__(self, cache_blocks, block_size, fresh_t):
-    self.cache_blocks = cache_blocks
-    self.block_size = block_size
-    self.fresh_t = fresh_t
-
-    blocks = []
-
-  def insert_block():
-    pass
-
-
-  class Block:
-    def __init__(self, start, block_size, t_fresh, t_modified, data):
-      pass
-
-
-class Requests:
-  def __init__(self):
-    self.pending_requests = []
-    self.pending_requests_semaphore = threading.Semaphore(0)
-    self.pending_requests_mutex = threading.Lock()
-
-  def insert_request(self, payload):
-    self.pending_requests_mutex.acquire()
-    
-    # Append Request to List
-    self.pending_requests.append(self.Request(payload))
-    
-    self.pending_requests_semaphore.release()
-    self.pending_requests_mutex.release()
-
-    # Block Application till Request Satisfied
-    self.pending_requests[-1].block_application_semaphore.acquire()
-
-
-  class Request:
-    def __init__(self, payload):
-      self.payload = payload
-      self.block_application_semaphore = threading.Semaphore(0)
-
-
-
-class Files:
-  def __init__(self):
-    self.files = []
-    self.fd_count = 0
-    self.files_mutex = threading.Lock()
-
-
-  def append_file(self, file_path, file_id):
-    self.files_mutex.acquire()
-
-    for file in self.files:
-      if file.file_id != file_id:
-        continue
-      
-      # ID Already Exists
-      file.add_fd(self.fd_count)
-      self.fd_count = self.fd_count + 1
-      
-      self.files_mutex.release()
-      return
-    
-    # ID Does Not Exist
-    self.files.append(self.File(
-      file_path = file_path,
-      file_id = file_id,
-      file_fd = self.fd_count
-    ))
-
-    self.fd_count = self.fd_count + 1
-
-    self.files_mutex.release()
-
-  # Return FD Based on File Path
-  def get_fd(self, file_path):
-    self.files_mutex.acquire()
-    for file in self.files:
-      if file.file_path != file_path:
-        continue 
-      
-      for fd in file.file_fds:
-        if fd['position'] < 0:
-          fd['position'] = 0
-          
-          self.files_mutex.release()
-          return fd['fd']
-
-    self.files_mutex.release()
-    return -1
-
-  # Return ID Based on FD
-  def get_id(self, file_fd):
-    self.files_mutex.acquire()
-    for file in self.files:
-      if not file.contains(file_fd):
-        continue
-
-      self.files_mutex.release()
-      return file.file_id
-
-    self.files_mutex.release()
-    return -1
-
-
-
-  class File:
-    file_fds = []
-    def __init__(self, file_path, file_id, file_fd):
-      self.file_path = file_path
-      self.file_id = file_id
-      self.file_fds.append({
-        'fd': file_fd,
-        'position': -1
-      })
-
-    def add_fd(self, file_fd):
-      self.file_fds.append({
-        'fd': file_fd,
-        'position': -1
-      })
-
-    def contains(self, file_fd):
-      for fd in self.file_fds:
-        if fd['fd'] != file_fd:
-          continue
-        return True
-      return False
-
 
 SERVER_IP = None
 SERVER_PORT = None
 udp_unicast_fd = None
 files_container = None
 requests_container = None
+cache = None
+
+# Cache Information
+cache_blocks = 1
+cache_fresh_t = 1
+cache_block_size = 10
+
+
+def handle_lookup_locally(selected_request):
+  request_fields = selected_request.fields
+  header, file_path, flags = request_fields
+  
+  
+  # Check Locally if File Already Exists
+  selected_file = files_container.get_file_by_path(file_path)
+  if not selected_file:
+    return False
+  
+  # Append FD
+  files_container.append_file(selected_file.file_path, selected_file.file_path)
+  return True
+
+def handle_lookup(selected_request):
+  # Try to Satisfy Request without Contacting the Server
+  if handle_lookup_locally(selected_request):
+    # Unblock Application
+    selected_request.block_application_semaphore.release()
+    return
+  
+  # Send Request to Server
+  selected_request.request_socket_fd.sendto(selected_request.request, (SERVER_IP, SERVER_PORT))
+  
+  
+  # Wait for the Respose
+  response, _ = selected_request.request_socket_fd.recvfrom(PACKET_LENGTH)
+  response_fields = Request.parse_request(response)
+
+  # Handle Lookup Requests
+  try:
+    response_type, status, file_path, file_id = response_fields 
+  except:
+    response_type, status = response_fields
+  
+  if status != b'ACK':
+    # Unblock Application
+    selected_request.block_application_semaphore.release()
+    return
+  
+  
+  files_container.append_file(file_path.decode(), int(file_id.decode()))
+  selected_request.block_application_semaphore.release()
+
+
+def handle_read(selected_request):
+  request_type, file_id, block_size, position, length = selected_request.fields
+  
+  cached_blocks = cache.get_blocks(file_id, position, length)
+  # Reconstruct Response Buffered from the Valid Cache Blocks
+  
+  
+  
+  # Request Missing Blocks
+  # for 
+  for block in cached_blocks:
+    missing_blocks_request = Request(request_type, file_id, block_size, block_size)
+    missing_blocks_request.request_socket_fd.sendto(missing_blocks_request.request, (SERVER_IP, SERVER_PORT))
+  
+  
 
 
 
-
-
-
-
-
+# Thread
 def requests_handler():
   while True:
     requests_container.pending_requests_semaphore.acquire()
@@ -172,26 +97,18 @@ def requests_handler():
     
     # Get Request
     selected_request = requests_container.pending_requests.pop(0)
-
+    
     requests_container.pending_requests_mutex.release()
 
-    # Handle Request
-    udp_unicast_fd.sendto(selected_request.payload.encode(), (SERVER_IP, SERVER_PORT))
+    request_type, *_ = selected_request.fields
     
-    response, server_address = udp_unicast_fd.recvfrom(PACKET_LENGTH)
-    response = response.split(SEPERATOR)
-
-    # Handle Lookup Requests
-    if response[0] == b'LOOKUP_RES':
-      if response[1] != b'ACK':
-        continue
-      files_container.append_file(response[2].decode(), int(response[3].decode()))
-    else:
-      pass
+    if request_type == 'LOOKUP_REQ':
+      handle_lookup(selected_request=selected_request)
+    elif request_type == 'READ_REQ':
+      handle_read(selected_request=selected_request)
 
 
-    # Unblock Application
-    selected_request.block_application_semaphore.release()
+    
     
 
 
@@ -205,33 +122,38 @@ def nfs_init(server_ip, server_port, cache_blocks, block_size, fresh_t):
   global SERVER_PORT
   global files_container
   global requests_container
-  global udp_unicast_fd
-
+  global cache
+  
   SERVER_IP = server_ip
   SERVER_PORT = server_port
   requests_container = Requests()
   files_container = Files()
-
-
-  udp_unicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+  cache = Cache(cache_blocks=cache_blocks, block_size=cache_block_size, fresh_t=cache_fresh_t)
   
-  request_handler_thread = threading.Thread(target=requests_handler)
-  request_handler_thread.start()
+  for _ in range(THREADS):
+    request_handler_thread = threading.Thread(target=requests_handler)
+    request_handler_thread.start()
 
 
 
 
 def nfs_open(path, flags):
-  payload = f'LOOKUP_REQ:{flags}:{path}'
-  requests_container.insert_request(payload)
-  return files_container.get_fd(path)
+  requests_container.insert_request(Request('LOOKUP_REQ', path, flags))
+  return files_container.get_fd_from_path(path)
   
 
 
 
 
-def nfs_read(fd, buffer, length):
-  pass
+def nfs_read(fd, length):
+  selected_file = files_container.get_file_from_fd(fd)
+  file_id = selected_file.file_id
+  position = selected_file.get_position(fd)
+  block_size = cache.block_size
+  
+  requests_container.insert_request(Request('READ_REQ', file_id, block_size, position, length))
+  
+  #return buffer, buffer_length
 
 
 def nfs_write(fd, buffer, length):
