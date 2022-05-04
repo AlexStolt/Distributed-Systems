@@ -56,6 +56,7 @@ typedef struct file {
   char file_path[SIZE];
   int file_id;
   int file_fd;
+  int t_modified;
 } file_t;
 
 
@@ -73,11 +74,12 @@ file_container_t *file_container;
 
 field_t *parse_request(char *request, int *fields_length);
 void print_request(request_t *request);
-char *serialize_request(char fields[SIZE][SIZE], int fields_length, int *serialized_request_length);
+char *serialize_request(field_t *fields, int fields_length, int *serialized_request_length);
 requests_list_t *requests_list_init();
 void append_request(requests_list_t *requests_list, request_t *request);
 request_t *pop_request(requests_list_t *requests_list);
-
+file_container_t *files_init();
+int _unicast_socket_init();
 
 void nfs_server_init();
 

@@ -15,9 +15,21 @@ class Cache:
     
     self.blocks = []
 
-  def insert_block(self, start, valid_size, data):
-    self.cache_mutex.acquire()
-    self.blocks.append(self.Block(start=start, valid_size=valid_size, t_fresh=time.time(), data=data))
+  def find_block(self, file_id: int, start: int):
+    self.cache_mutex.acquire()  
+    for block in self.blocks:
+      if block.file_id != file_id or block.start != start:
+        continue
+      
+      self.cache_mutex.release()
+      return block
+    
+    self.cache_mutex.release()
+    return None
+    
+  def insert_block(self, block):
+    self.cache_mutex.acquire()  
+    self.blocks.append(block)
     self.cache_mutex.release()
     
   def get_blocks(self, file_id: int, position: int, length: int):
@@ -33,8 +45,10 @@ class Cache:
     while end % self.block_size:
       end = end + 1
     
+    start_position = start
     for _ in range(int((end - start) / self.block_size)):
-      requested_blocks.append(None)
+      requested_blocks.append(self.Block(file_id, start=start_position, valid_block_size=-1, t_fresh=-1, data=''))
+      start_position = start_position + self.block_size
     
     self.cache_mutex.acquire()
     for block in self.blocks:
@@ -44,15 +58,12 @@ class Cache:
       if block.start < start or block.start + self.block_size > end:
         continue
       
-      requested_blocks[block.start / self.block_size] = copy.deepcopy(block)
+      requested_blocks[int(block.start / self.block_size)] = copy.deepcopy(block)
     
     self.cache_mutex.release()
     return requested_blocks
 
 
-  def check_block_state(self, block):
-    return True
-  
   
   class Block:
     def __init__(self, file_id, start, valid_block_size, t_fresh, data):
@@ -66,13 +77,34 @@ class Cache:
       # Variables that are True can be discarded by the LRU
       self.delivered_to_application = False
     
-    def update_block():
-      pass
+    def update_block(self, valid_block_size, t_fresh, t_modified, data):
+      self.valid_block_size = valid_block_size
+      self.t_fresh = t_fresh
+      self. t_modified = t_modified
+      self.data = data
+    
+    
+    @property
+    def is_valid(self):
+      if self.valid_block_size < 0 or self.t_fresh < 0:
+        return False
+      return True
+    
+    @property
+    def is_fresh(self):
+      if time.time() > self.t_fresh:
+        return False
+      return True
+    
+    def __str__(self):
+      return f'[file_id: {self.file_id} start: {self.start} valid_block_size: {self.valid_block_size} fresh_t: {self.t_fresh} t_modified: {self. t_modified} data: {self.data}]'
 
 
 class Requests:
+  sequence = 0
   def __init__(self):
     self.pending_requests = []
+    
     self.pending_requests_semaphore = threading.Semaphore(0)
     self.pending_requests_mutex = threading.Lock()
 
@@ -89,6 +121,48 @@ class Requests:
     self.pending_requests[-1].block_application_semaphore.acquire()
 
 
+class SatisfiedRequests():
+  def __init__(self):
+    self.satisfied_blocks = []
+    self.satisfied_blocks_mutex = threading.Lock()
+  
+  def insert_satisfied_request(self, request_sequence, blocks):
+    self.satisfied_blocks_mutex.acquire()
+    self.satisfied_blocks.append(self.SatisfiedBlocks(request_sequence, blocks))
+    self.satisfied_blocks_mutex.release()
+    
+  def get_satisfied_request(self, request_sequence):
+    for satisfied_block in self.satisfied_blocks:
+      if satisfied_block.request_sequence != request_sequence:
+        continue
+      return satisfied_block
+    return None
+  
+  class SatisfiedBlocks:
+    def __init__(self, request_sequence, blocks):
+      self.request_sequence = request_sequence
+      self.blocks = blocks
+    
+    def get_data(self, position: int, length: int):
+      data = ''
+      
+      for i, block in enumerate(self.blocks):
+        if not i:
+          start = position - block.start
+          end = start + min(length - len(data), block.valid_block_size)
+          
+          data = block.data[start:end]
+        elif i != len(self.blocks) - 1:
+          data = data + block.data
+        else:
+          data = data + block.data[:min(length - len(data), block.valid_block_size)]
+      
+      return data, len(data)
+      
+    def __str__(self):
+      return f'Sequence: {self.request_sequence}, Blocks: {self.blocks}'
+
+
 class Request:
   def __init__(self, *fields):
     self.request = ''
@@ -100,8 +174,15 @@ class Request:
     self.fields = fields
     self.request = self.request.encode()
     self.block_application_semaphore = threading.Semaphore(0)
+    self.sequence_mutex = threading.Lock()
     self.request_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
+    # Increment Sequence Number
+    self.sequence_mutex.acquire()
+    self.sequence = Requests.sequence
+    Requests.sequence = Requests.sequence + 1
+    self.sequence_mutex.release()
+        
   # Parse an encoded request string to its multiple fields
   @staticmethod
   def parse_request(encoded_request: str):
@@ -170,8 +251,8 @@ class Files:
         continue 
       
       for fd in file.file_fds:
-        if fd['fp_position'] < 0:
-          fd['fp_position'] = 0
+        if fd['position'] < 0:
+          fd['position'] = 0
           
           self.files_mutex.release()
           return fd['fd']
@@ -192,8 +273,7 @@ class Files:
 
     self.files_mutex.release()
     return -1
-
-
+  
   # Return a File from its FD
   def get_file_from_fd(self, file_fd: int):
     self.files_mutex.acquire()
@@ -235,6 +315,13 @@ class Files:
     self.files_mutex.release()
     return None
 
+  def update_position_by_file(self, file, fd, position):
+    self.files_mutex.acquire()
+    if file.update_position(fd, position):
+      self.files_mutex.release()
+      return True
+    return False
+
 
   class File:
     file_fds = []
@@ -243,13 +330,13 @@ class Files:
       self.file_id = file_id
       self.file_fds.append({
         'fd': file_fd,
-        'fp_position': -1
+        'position': -1
       })
 
     def add_fd(self, file_fd):
       self.file_fds.append({
         'fd': file_fd,
-        'fp_position': -1
+        'position': -1
       })
 
     def contains(self, file_fd):
@@ -259,9 +346,24 @@ class Files:
         return True
       return False
 
+    def fd_index(self, file_fd: int):
+      for i, fd in enumerate(self.file_fds):
+        if fd['fd'] != file_fd:
+          continue
+        return i
+      return -1
+
     def get_position(self, file_fd: int):
       for fd in self.file_fds:
         if fd['fd'] != file_fd:
           continue
-        return fd['fp_position']
+        return fd['position']
       return -1
+
+    def update_position(self, file_fd: int, position: int):
+      for fd in self.file_fds:
+        if fd['fd'] != file_fd:
+          continue
+        fd['position'] = position
+        return True
+      return False

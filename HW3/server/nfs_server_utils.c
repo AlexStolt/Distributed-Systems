@@ -72,7 +72,7 @@ int lookup_handler(char *file_path, int flags){
     strcpy(file->file_path, file_path);
     file->file_id = file_container->current_id;
     file->file_fd = fd;
-
+    file->t_modified = 0;
 
     file_container->files[file_container->length] = file;
     file_container->length++;
@@ -91,13 +91,21 @@ void *udp_requests_handler(void *arguments){
   int flags;
   int file_id;
   char file_id_string[SIZE]; 
-  char response_fields[SIZE][SIZE];
-  int fields_length;
+  
   char *serialized_response;
+  
+  
+  // Used for Read Operations
+  int position;
+  int length;
+  int file_position;
+  char t_modified_string[SIZE];
+  char *read_buffer;
+  ssize_t bytes_read;
+
+  field_t response_fields[SIZE];
+  int fields_length;
   int response_length;
-
-
-
 
   while (1){
     // Select a Pending Request
@@ -116,17 +124,36 @@ void *udp_requests_handler(void *arguments){
 
       // Set Response
       if(file_id < 0){
-        strcpy(response_fields[0], "LOOKUP_RES");
-        strcpy(response_fields[1], "NACK");
+        // Response Type
+        strcpy(response_fields[0].field, "LOOKUP_RES");
+        response_fields[0].length = strlen(response_fields[0].field);
+
+        // Response Status
+        strcpy(response_fields[1].field, "NACK");
+        response_fields[1].length = strlen(response_fields[1].field);
+        
+        // Total Fields
         fields_length = 2;
       }
       else {
-        strcpy(response_fields[0], "LOOKUP_RES");
-        strcpy(response_fields[1], "ACK");
-        strcpy(response_fields[2], file_path);
+        // Response Type
+        strcpy(response_fields[0].field, "LOOKUP_RES");
+        response_fields[0].length = strlen(response_fields[0].field);
         
+        // Response Status
+        strcpy(response_fields[1].field, "ACK");
+        response_fields[1].length = strlen(response_fields[1].field);
+
+        // File Path
+        strcpy(response_fields[2].field, file_path);
+        response_fields[2].length = strlen(response_fields[2].field);
+
+        // File ID
         sprintf(file_id_string, "%d", file_id);
-        strcpy(response_fields[3], file_id_string);
+        strcpy(response_fields[3].field, file_id_string);
+        response_fields[3].length = strlen(response_fields[3].field);
+
+        // Total Fields
         fields_length = 4;
       }
 
@@ -137,49 +164,63 @@ void *udp_requests_handler(void *arguments){
       sendto(unicast_socket_fd, serialized_response, response_length * sizeof(char), 0, &selected_request->source, selected_request->address_length);
     }
     else if(!strcmp(request_type, "READ_REQ")){
+      file_id = atoi(selected_request->fields[1].field);
+      position = atoi(selected_request->fields[2].field);
+      length = atoi(selected_request->fields[3].field);
 
+      // Allocate Memory for the Read Buffer based on the Length
+      read_buffer = (char *) calloc(length, sizeof(char));
+      if(!read_buffer){
+        continue;
+      }
+
+
+      // Search for File FD using its ID
+      file_position = -1;
+      for(int i = 0; i < file_container->length; i++){
+        if(!file_container->files[i]){
+          continue;
+        }
+        
+        if(file_container->files[i]->file_id != file_id){
+          continue;
+        }
+
+        file_position = i;
+        break;
+      }
+
+
+
+      // file_container->files[file_position]
+      lseek(file_container->files[file_position]->file_fd, position, SEEK_SET);
+      memset(read_buffer, 0, length * sizeof(char));
+      bytes_read = read(file_container->files[file_position]->file_fd, read_buffer, length);
+
+      // Response Type
+      strcpy(response_fields[0].field, "READ_RES");
+      response_fields[0].length = strlen(response_fields[0].field);
+
+      // T_MODIFIED
+      sprintf(t_modified_string, "%d", file_container->files[file_position]->t_modified);
+      strcpy(response_fields[1].field, t_modified_string);
+      response_fields[1].length = strlen(response_fields[1].field);
+      
+      // Response Buffer
+      strncpy(response_fields[2].field, read_buffer, bytes_read);
+      response_fields[2].length = bytes_read;
+
+      // Total Fields
+      fields_length = 3;
+      
+      // Serialize Response from Fields
+      serialized_response = serialize_request(response_fields, fields_length, &response_length);
+      
+      // Send Response
+      sendto(unicast_socket_fd, serialized_response, response_length * sizeof(char), 0, &selected_request->source, selected_request->address_length);
     }
 
   }
-}
-
-
-
-int _unicast_socket_init(){
-  int unicast_fd;
-  struct sockaddr_in server_addr;
-  int enable = 1;
-
-  if((unicast_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0){
-    exit(EXIT_FAILURE);
-  }
-      
-  memset(&server_addr, 0, sizeof(server_addr));
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(PORT);
-  
-  if (setsockopt(unicast_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0){
-    exit(EXIT_FAILURE);
-  }
-
-  if(bind(unicast_fd, (const struct sockaddr *) &server_addr, sizeof(server_addr)) < 0){  
-    exit(EXIT_FAILURE);
-  }
-  
-  return unicast_fd;
-}
-
-
-file_container_t *files_init(){
-  file_container_t *file_container;
-
-  file_container = (file_container_t *) calloc(SIZE, sizeof(file_t));
-  if(!file_container){
-    exit(EXIT_FAILURE);
-  }
-
-  return file_container;
 }
 
 

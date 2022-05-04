@@ -10,23 +10,7 @@ void print_address(struct sockaddr *address){
 }
 
 
-int get_next_integer(char *string, char **end_pointer){
-  char *pointer = string;
-  long integer;
-  while (*pointer) {
-    if(isdigit(*pointer)) {
-      integer = strtol(pointer, &pointer, 10);
-      *end_pointer = pointer + 1;
-      return integer;
-
-    } else {
-      pointer++;
-    }
-  }
-  return -1;
-}
-
-char *serialize_request(char fields[SIZE][SIZE], int fields_length, int *serialized_request_length){
+char *serialize_request(field_t *fields, int fields_length, int *serialized_request_length){
   char *serialized_request;
   char local_serialized_request[SIZE]; 
   int field_length = 0;
@@ -43,15 +27,20 @@ char *serialize_request(char fields[SIZE][SIZE], int fields_length, int *seriali
 
   for(int i = 0; i < fields_length; i++){
     // Calculate the Field Length and Append
-    field_length = strlen(fields[i]);
+    field_length = fields[i].length;
     sprintf(field_length_string, "%d", field_length);
     strncpy(local_serialized_request + offset, field_length_string, strlen(field_length_string));
-    offset = offset + strlen(field_length_string) + 1;
-     
+    
+    // Add a NULL Separator to String
+    offset = offset + strlen(field_length_string);
+    local_serialized_request[offset] = '\0';
+    
+    // Go a Byte Next to the NULL Separator
+    offset =  offset + 1;
+
     // Append Field
-    strncpy(local_serialized_request + offset, fields[i], strlen(fields[i]));
-    offset = offset + strlen(fields[i]);
-    //break;
+    strncpy(local_serialized_request + offset, fields[i].field, fields[i].length);
+    offset = offset + fields[i].length;
   }
 
   
@@ -113,6 +102,46 @@ void print_request(request_t *request){
   printf("\n");
   fflush(stdout);
 }
+
+
+
+int _unicast_socket_init(){
+  int unicast_fd;
+  struct sockaddr_in server_addr;
+  int enable = 1;
+
+  if((unicast_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0){
+    exit(EXIT_FAILURE);
+  }
+      
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+  server_addr.sin_port = htons(PORT);
+  
+  if (setsockopt(unicast_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0){
+    exit(EXIT_FAILURE);
+  }
+
+  if(bind(unicast_fd, (const struct sockaddr *) &server_addr, sizeof(server_addr)) < 0){  
+    exit(EXIT_FAILURE);
+  }
+  
+  return unicast_fd;
+}
+
+
+file_container_t *files_init(){
+  file_container_t *file_container;
+
+  file_container = (file_container_t *) calloc(SIZE, sizeof(file_t));
+  if(!file_container){
+    exit(EXIT_FAILURE);
+  }
+
+  return file_container;
+}
+
 
 
 // ******************************************************** List Utilities ********************************************************//
