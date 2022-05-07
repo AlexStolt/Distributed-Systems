@@ -6,7 +6,7 @@ import string
 
 # Cache Information
 cache_blocks = 4
-cache_fresh_t = 10
+cache_fresh_t = 1
 cache_block_size = 10
 
 
@@ -20,14 +20,21 @@ def random_string():
 
 def create_file():
     # sleep(random.randint(0, 4))
-    fd = nfs_open("random.txt", O_RDONLY)
+    fd = nfs_open("random.txt", O_RDWR)
     # print(fd)
-    nfs_seek(fd, 3, SEEK_SET)
-    print(nfs_read(fd, 4))
+    # nfs_seek(fd, 3, SEEK_SET)
+    # print(nfs_read(fd, 4))
     
-    sleep(4)
+    # sleep(4)
+    buffer = "Hello-from-Client"
+    nfs_seek(fd, 12, SEEK_SET)
+    nfs_write(fd, buffer, 11)
     
-    nfs_seek(fd, 4, SEEK_CUR)
+    # buffer = "Hello-from-Client"
+    # nfs_seek(fd, 12, SEEK_SET)
+    # nfs_write(fd, buffer, 11)
+    
+    nfs_seek(fd, 4, SEEK_SET)
     print(nfs_read(fd, 15))
     
 

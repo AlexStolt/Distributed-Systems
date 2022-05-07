@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <ctype.h>
+#include <math.h>
 
 #define PORT 8080
 #define SIZE 1024
@@ -48,15 +49,16 @@ typedef struct requests_list {
 } requests_list_t;
 
 
-
-
-
+typedef struct block {
+  int start;
+  int t_modified;
+} block_t;
 
 typedef struct file {
   char file_path[SIZE];
   int file_id;
   int file_fd;
-  int t_modified;
+  block_t *blocks[SIZE];
 } file_t;
 
 
@@ -80,6 +82,9 @@ void append_request(requests_list_t *requests_list, request_t *request);
 request_t *pop_request(requests_list_t *requests_list);
 file_container_t *files_init();
 int _unicast_socket_init();
+block_t *get_block_from_file(file_t *file, int start);
+int get_emtpy_block_position(file_t *file);
+int get_fd_by_id(file_container_t *file_container, int file_id);
 
 void nfs_server_init();
 

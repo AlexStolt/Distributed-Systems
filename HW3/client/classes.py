@@ -47,7 +47,7 @@ class Cache:
     
     start_position = start
     for _ in range(int((end - start) / self.block_size)):
-      requested_blocks.append(self.Block(file_id, start=start_position, valid_block_size=-1, t_fresh=-1, data=''))
+      requested_blocks.append(Block(file_id, start=start_position, valid_block_size=-1, t_fresh=-1, data=''))
       start_position = start_position + self.block_size
     
     self.cache_mutex.acquire()
@@ -58,46 +58,49 @@ class Cache:
       if block.start < start or block.start + self.block_size > end:
         continue
       
-      requested_blocks[int(block.start / self.block_size)] = copy.deepcopy(block)
+      for block_index in range(len(requested_blocks)):
+        if requested_blocks[block_index].start != block.start:
+          continue
+        requested_blocks[block_index] = copy.deepcopy(block)
     
     self.cache_mutex.release()
     return requested_blocks
 
 
   
-  class Block:
-    def __init__(self, file_id, start, valid_block_size, t_fresh, data):
-      self.file_id = file_id
-      self.start = start
-      self.valid_block_size = valid_block_size
-      self.t_fresh = t_fresh
-      self. t_modified = -1
-      self.data = data
-      
-      # Variables that are True can be discarded by the LRU
-      self.delivered_to_application = False
+class Block:
+  def __init__(self, file_id, start, valid_block_size, t_fresh, data):
+    self.file_id = file_id
+    self.start = start
+    self.valid_block_size = valid_block_size
+    self.t_fresh = t_fresh
+    self. t_modified = -1
+    self.data = data
     
-    def update_block(self, valid_block_size, t_fresh, t_modified, data):
-      self.valid_block_size = valid_block_size
-      self.t_fresh = t_fresh
-      self. t_modified = t_modified
-      self.data = data
-    
-    
-    @property
-    def is_valid(self):
-      if self.valid_block_size < 0 or self.t_fresh < 0:
-        return False
-      return True
-    
-    @property
-    def is_fresh(self):
-      if time.time() > self.t_fresh:
-        return False
-      return True
-    
-    def __str__(self):
-      return f'[file_id: {self.file_id} start: {self.start} valid_block_size: {self.valid_block_size} fresh_t: {self.t_fresh} t_modified: {self. t_modified} data: {self.data}]'
+    # Variables that are True can be discarded by the LRU
+    self.delivered_to_application = False
+  
+  def update_block(self, valid_block_size, t_fresh, t_modified, data):
+    self.valid_block_size = valid_block_size
+    self.t_fresh = t_fresh
+    self. t_modified = t_modified
+    self.data = data
+  
+  
+  @property
+  def is_valid(self):
+    if self.valid_block_size < 0 or self.t_fresh < 0:
+      return False
+    return True
+  
+  @property
+  def is_fresh(self):
+    if time.time() > self.t_fresh:
+      return False
+    return True
+  
+  def __str__(self):
+    return f'[file_id: {self.file_id} start: {self.start} valid_block_size: {self.valid_block_size} fresh_t: {self.t_fresh} t_modified: {self. t_modified} data: {self.data}]'
 
 
 class Requests:

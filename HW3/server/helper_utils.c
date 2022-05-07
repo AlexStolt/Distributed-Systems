@@ -18,7 +18,6 @@ char *serialize_request(field_t *fields, int fields_length, int *serialized_requ
   int offset = 0;
   char offset_str[SIZE];
   
-
   // Allocate Memory for the Request
   serialized_request = (char *) calloc(SIZE, sizeof(char));
   if(!serialized_request){
@@ -39,7 +38,9 @@ char *serialize_request(field_t *fields, int fields_length, int *serialized_requ
     offset =  offset + 1;
 
     // Append Field
-    strncpy(local_serialized_request + offset, fields[i].field, fields[i].length);
+    for(int j = 0; j < fields[i].length; j++){
+      local_serialized_request[offset + j] = fields[i].field[j];
+    }
     offset = offset + fields[i].length;
   }
 
@@ -56,6 +57,30 @@ char *serialize_request(field_t *fields, int fields_length, int *serialized_requ
 }
 
 
+block_t *get_block_from_file(file_t *file, int start){
+  int i;
+
+  i = 0;
+  while(file->blocks[i]){
+    if(file->blocks[i]->start != start){
+      i++;
+      continue;
+    }
+    return file->blocks[i];
+  }
+  return NULL;
+}
+
+
+int get_emtpy_block_position(file_t *file){
+  int i;
+
+  i = 0;
+  while(file->blocks[i]){
+    i++;
+  }
+  return i;
+}
 
 
 field_t *parse_request(char *request, int *fields_length){
@@ -141,6 +166,28 @@ file_container_t *files_init(){
 
   return file_container;
 }
+
+
+int get_fd_by_id(file_container_t *file_container, int file_id){
+  int file_position;
+  
+  file_position = -1;
+  for(int i = 0; i < file_container->length; i++){
+    if(!file_container->files[i]){
+      continue;
+    }
+    
+    if(file_container->files[i]->file_id != file_id){
+      continue;
+    }
+
+    file_position = i;
+    break;
+  }
+
+  return file_position;
+}
+
 
 
 
