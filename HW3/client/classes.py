@@ -2,6 +2,7 @@ import threading
 import time
 import socket
 import copy
+import sys
 
 
 SEPERATOR = '\0'
@@ -28,8 +29,25 @@ class Cache:
     return None
     
   def insert_block(self, block):
-    self.cache_mutex.acquire()  
-    self.blocks.append(block)
+    self.cache_mutex.acquire()
+    block_index = -1
+    freshness = sys.maxsize
+    
+    # LRU when Cache is Full
+    if len(self.blocks) == self.cache_blocks:
+      # Find Oldest Cached Block
+      for i, cache_block in enumerate(self.blocks):
+        if cache_block.t_fresh < freshness:
+          block_index = i
+          freshness = cache_block.t_fresh
+      
+      #  Remove Block from Cache
+      if block_index != -1:
+        self.blocks.pop(block_index)
+        
+    if len(self.blocks) != self.cache_blocks:
+      self.blocks.append(block)
+    
     self.cache_mutex.release()
     
   def get_blocks(self, file_id: int, position: int, length: int):
@@ -74,7 +92,7 @@ class Block:
     self.start = start
     self.valid_block_size = valid_block_size
     self.t_fresh = t_fresh
-    self. t_modified = -1
+    self.t_modified = -1
     self.data = data
     
     # Variables that are True can be discarded by the LRU
@@ -85,6 +103,12 @@ class Block:
     self.t_fresh = t_fresh
     self. t_modified = t_modified
     self.data = data
+  
+  def reset_block(self):
+    self.valid_block_size = -1 
+    self.t_fresh = -1 
+    self.t_modified = -1
+    self.data = ''
   
   
   @property
@@ -126,24 +150,84 @@ class Requests:
 
 class SatisfiedRequests():
   def __init__(self):
-    self.satisfied_blocks = []
-    self.satisfied_blocks_mutex = threading.Lock()
-  
-  def insert_satisfied_request(self, request_sequence, blocks):
-    self.satisfied_blocks_mutex.acquire()
-    self.satisfied_blocks.append(self.SatisfiedBlocks(request_sequence, blocks))
-    self.satisfied_blocks_mutex.release()
+    self.satisfied_read_requests    = []
+    self.satisfied_lookup_requests  = []
+    self.satisfied_write_requests   = []
     
-  def get_satisfied_request(self, request_sequence):
-    for satisfied_block in self.satisfied_blocks:
-      if satisfied_block.request_sequence != request_sequence:
+    
+    self.satisfied_read_requests_mutex    = threading.Lock()
+    self.satisfied_lookup_requests_mutex  = threading.Lock()
+    self.satisfied_write_requests_mutex   = threading.Lock()
+    
+    
+  def insert_satisfied_lookup_request(self, request_sequence: int, status: bool):
+    self.satisfied_lookup_requests_mutex.acquire()
+    self.satisfied_lookup_requests.append(self.SatisfiedLookupRequest(request_sequence, status))
+    self.satisfied_lookup_requests_mutex.release()
+    
+
+  def get_satisfied_lookup_request(self, request_sequence):
+    self.satisfied_lookup_requests_mutex.acquire()
+    for request in self.satisfied_lookup_requests:
+      if request.request_sequence != request_sequence:
         continue
-      return satisfied_block
+      
+      self.satisfied_lookup_requests_mutex.release()
+      return request
+    
+    self.satisfied_lookup_requests_mutex.release()
     return None
   
-  class SatisfiedBlocks:
-    def __init__(self, request_sequence, blocks):
+      
+  def insert_satisfied_read_request(self, request_sequence: int, status: bool, blocks: list):
+    self.satisfied_read_requests_mutex.acquire()
+    self.satisfied_read_requests.append(self.SatisfiedReadRequest(request_sequence, status, blocks))
+    self.satisfied_read_requests_mutex.release()
+    
+    
+  def get_satisfied_read_request(self, request_sequence: int):
+    self.satisfied_read_requests_mutex.acquire()
+    for request in self.satisfied_read_requests:
+      if request.request_sequence != request_sequence:
+        continue
+      
+      self.satisfied_read_requests_mutex.release()
+      return request
+    
+    self.satisfied_read_requests_mutex.release()
+    return None
+  
+  
+  def insert_satisfied_write_request(self, request_sequence, status: bool, bytes_written: int):
+    self.satisfied_write_requests_mutex.acquire()
+    self.satisfied_write_requests.append(self.SatisfiedWriteRequest(request_sequence, status, bytes_written))
+    self.satisfied_write_requests_mutex.release()
+  
+  
+  def get_satisfied_write_request(self, request_sequence: int):
+    self.satisfied_write_requests_mutex.acquire()
+    for request in self.satisfied_write_requests:
+      if request.request_sequence != request_sequence:
+        continue
+      
+      self.satisfied_write_requests_mutex.release()
+      return request
+    
+    self.satisfied_write_requests_mutex.release()
+    return None
+  
+  
+  
+  class SatisfiedLookupRequest:
+    def __init__(self, request_sequence: int, status: bool):
       self.request_sequence = request_sequence
+      self.status = status
+  
+  
+  class SatisfiedReadRequest:
+    def __init__(self, request_sequence, status, blocks):
+      self.request_sequence = request_sequence
+      self.status = status
       self.blocks = blocks
     
     def get_data(self, position: int, length: int):
@@ -165,6 +249,12 @@ class SatisfiedRequests():
     def __str__(self):
       return f'Sequence: {self.request_sequence}, Blocks: {self.blocks}'
 
+
+  class SatisfiedWriteRequest:
+    def __init__(self, request_sequence, status, bytes_written):
+      self.request_sequence = request_sequence
+      self.status = status
+      self.bytes_written = bytes_written
 
 class Request:
   def __init__(self, *fields):
@@ -217,18 +307,23 @@ class Files:
   def __init__(self):
     self.files = []
     self.fd_count = 0
+    self.reincarnation_count = 0
     self.files_mutex = threading.Lock()
 
 # Append a File to the Files Container
-  def append_file(self, file_path: str, file_id: int):
+  def append_file(self, file_path: str, file_id: int, reincarnation_number: int):
     self.files_mutex.acquire()
+
+    # Used when handling lookup locally
+    if self.reincarnation_count < reincarnation_number:
+      self.reincarnation_count = reincarnation_number
 
     for file in self.files:
       if file.file_id != file_id:
         continue
       
       # ID Already Exists
-      file.add_fd(self.fd_count)
+      file.add_fd(self.fd_count, reincarnation_number)
       self.fd_count = self.fd_count + 1
       
       self.files_mutex.release()
@@ -238,7 +333,8 @@ class Files:
     self.files.append(self.File(
       file_path = file_path,
       file_id = file_id,
-      file_fd = self.fd_count
+      file_fd = self.fd_count,
+      reincarnation_number=reincarnation_number
     ))
 
     self.fd_count = self.fd_count + 1
@@ -318,27 +414,31 @@ class Files:
     self.files_mutex.release()
     return None
 
-  def update_position_by_file(self, file, fd, position):
+  def update_position_by_fd(self, file, fd, position):
     self.files_mutex.acquire()
     if file.update_position(fd, position):
       self.files_mutex.release()
       return True
+    
+    self.files_mutex.release()
     return False
 
 
   class File:
     file_fds = []
-    def __init__(self, file_path, file_id, file_fd):
+    def __init__(self, file_path, file_id, file_fd, reincarnation_number):
       self.file_path = file_path
       self.file_id = file_id
       self.file_fds.append({
         'fd': file_fd,
+        'reincarnation_number': reincarnation_number,
         'position': -1
       })
 
-    def add_fd(self, file_fd):
+    def add_fd(self, file_fd, reincarnation_number):
       self.file_fds.append({
         'fd': file_fd,
+        'reincarnation_number': reincarnation_number,
         'position': -1
       })
 
@@ -361,6 +461,13 @@ class Files:
         if fd['fd'] != file_fd:
           continue
         return fd['position']
+      return -1
+
+    def get_reincarnation_number(self, file_fd: int):
+      for fd in self.file_fds:
+        if fd['fd'] != file_fd:
+          continue
+        return fd['reincarnation_number']
       return -1
 
     def update_position(self, file_fd: int, position: int):

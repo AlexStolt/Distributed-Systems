@@ -5,8 +5,8 @@ import string
 
 
 # Cache Information
-cache_blocks = 4
-cache_fresh_t = 1
+cache_blocks = 10
+cache_fresh_t = 2
 cache_block_size = 10
 
 
@@ -19,24 +19,42 @@ def random_string():
     return str
 
 def create_file():
-    # sleep(random.randint(0, 4))
+    sleep(random.randint(0, 4))
     fd = nfs_open("random.txt", O_RDWR)
-    # print(fd)
-    # nfs_seek(fd, 3, SEEK_SET)
-    # print(nfs_read(fd, 4))
+    print("File Descriptor:", fd)
+
+    nfs_seek(fd, 3, SEEK_SET)
+    print(nfs_read(fd, 20))
     
-    # sleep(4)
     buffer = "Hello-from-Client"
     nfs_seek(fd, 12, SEEK_SET)
-    nfs_write(fd, buffer, 11)
+    print(nfs_write(fd, buffer, 11))
+    
+    
+    print(nfs_read(fd, 20))
+    # nfs_seek(fd, 3, SEEK_SET)
+    # print(nfs_read(fd, 20))
+    # # sleep(4)
+    
+    buffer = "Hello-from-Client"
+    nfs_seek(fd, 12, SEEK_SET)
+    print(nfs_write(fd, buffer, 11))
+    
+    # # time.sleep(2)
+    # nfs_seek(fd, 3, SEEK_SET)
+    # print(nfs_read(fd, 20))
+    # nfs_seek(fd, 3, SEEK_SET)
+    # print(nfs_read(fd, 20))
+    
+    
     
     # buffer = "Hello-from-Client"
     # nfs_seek(fd, 12, SEEK_SET)
     # nfs_write(fd, buffer, 11)
     
-    nfs_seek(fd, 4, SEEK_SET)
-    print(nfs_read(fd, 15))
-    
+    # nfs_seek(fd, 4, SEEK_SET)
+    # print(nfs_read(fd, 15))
+    print("END OF THREAD")
 
 
 if __name__ == '__main__':

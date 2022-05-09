@@ -72,7 +72,8 @@ typedef struct file_container {
 int unicast_socket_fd;
 requests_list_t *requests_list;
 file_container_t *file_container;
-
+FILE *reincarnation_file_fp;
+int current_reincarnation_number;
 
 field_t *parse_request(char *request, int *fields_length);
 void print_request(request_t *request);

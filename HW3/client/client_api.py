@@ -39,13 +39,15 @@ def handle_lookup_locally(selected_request):
     return False
   
   # Append FD
-  files_container.append_file(selected_file.file_path, selected_file.file_path)
+  files_container.append_file(selected_file.file_path, selected_file.file_path, files_container.reincarnation_count)
   return True
+
 
 def handle_lookup(selected_request):
   # Try to Satisfy Request without Contacting the Server
   if handle_lookup_locally(selected_request):
-    # Unblock Application
+    # Notify that the Request was Successfull and Unblock Application
+    satisfied_requests.insert_satisfied_lookup_request(request_sequence=selected_request.sequence, status=True)
     selected_request.block_application_semaphore.release()
     return
   
@@ -56,48 +58,56 @@ def handle_lookup(selected_request):
   # Wait for the Respose
   response, _ = selected_request.request_socket_fd.recvfrom(PACKET_LENGTH)
   response_fields = Request.parse_request(response)
-  print(response)
+
   # Handle Lookup Requests
   try:
-    response_type, status, file_path, file_id = response_fields 
+    response_type, status, file_path, file_id, reincarnation_number = response_fields 
   except:
     response_type, status = response_fields
   
   if status != b'ACK':
-    # Unblock Application
+    # Notify that the Request was not Successfull and Unblock Application
+    satisfied_requests.insert_satisfied_lookup_request(request_sequence=selected_request.sequence, status=False)
     selected_request.block_application_semaphore.release()
     return
   
+  # Append File
+  files_container.append_file(file_path.decode(), int(file_id.decode()), int(reincarnation_number.decode()))
   
-  files_container.append_file(file_path.decode(), int(file_id.decode()))
+  # Notify that the Request was Successfull and Unblock Application
+  satisfied_requests.insert_satisfied_lookup_request(request_sequence=selected_request.sequence, status=True)
   selected_request.block_application_semaphore.release()
 
 
 def handle_read(selected_request):
-  request_type, file_id, block_size, fp_position, length = selected_request.fields
+  request_type, file_id, reincarnation_number, block_size, fp_position, length = selected_request.fields
   
   # Get Blocks from Cache
   cached_blocks = cache.get_blocks(file_id, fp_position, length)
   
   # Request Missing Blocks or Blocks that have Expired
   for block in cached_blocks:
+    # Cache Block was Removed by the LRU and must be Reset
+    if not cache.find_block(block.file_id, block.start):
+      block.reset_block()
+    
     # Check if Block is Valid (If Block is Valid the Block is in Cache) and if Block is Fresh 
     if (not block.is_valid) or (block.is_valid and not block.is_fresh):
       
       # Cache Miss
       if not block.is_valid:
         if DEBUG:
-          print(f"\033[91mCache Miss: [Start: {block.start}, Size: {block.valid_block_size}]\033[00m")
+          print(f"\033[91mCache Miss: [{block.start}, {block.start + block_size}]\033[00m")
       
       # Cache Block Expiration
       elif block.is_valid and not block.is_fresh:
         if DEBUG:
-          print(f"\033[93mExpired Block: [Start: {block.start}, Size: {block.valid_block_size}]\033[00m")
+          print(f"\033[93mExpired Block: [{block.start}, {block.start + block_size}]\033[00m")
       
       
       # Create the Request
-      request = Request(request_type, file_id, block.start, block_size, block.t_modified)
-      print(request_type, file_id, block.start, block_size, block.t_modified)
+      request = Request(request_type, file_id, reincarnation_number, block.start, block_size, block.t_modified)
+      
       # Send Request to Server
       request.request_socket_fd.sendto(request.request, (SERVER_IP, SERVER_PORT))
     
@@ -105,7 +115,8 @@ def handle_read(selected_request):
       response, _ = request.request_socket_fd.recvfrom(PACKET_LENGTH)
       response_fields = Request.parse_request(response)
       
-      if len(response_fields) > 2:
+      # ACK and Data
+      if len(response_fields) == 4:
         # Block was Refreshed
         response_type, status, t_modified, data = response_fields 
         
@@ -113,14 +124,25 @@ def handle_read(selected_request):
         block.valid_block_size = len(data)
         block.t_modified = int(t_modified)
         block.data = data
-      else:
+      
+      # NACK
+      elif len(response_fields) == 3:
         if DEBUG:
-          print(f"\033[93mExpired Block: [Start: {block.start}] is Fresh\033[00m")
+          _, _, error_message = response_fields
+          print("Error in Read:", error_message)        
+        
+        satisfied_requests.insert_satisfied_read_request(selected_request.sequence, False, [])
+        selected_request.block_application_semaphore.release()
+        return
+      
+      # ACK
+      elif len(response_fields) == 2:
+        if DEBUG:
+          print(f"\033[93mExpired Block not Modified: [{block.start}, {block.start + block_size}]\033[00m")
+      
       
       # Refresh Block Freshness
       block.t_fresh = time.time() + cache.fresh_t
-        
-        
         
       # Insert or Update Blocks
       selected_block = cache.find_block(file_id, block.start)
@@ -132,31 +154,30 @@ def handle_read(selected_request):
         selected_block.update_block(block.valid_block_size, block.t_fresh, block.t_modified, block.data)
     else:
       if DEBUG:
-        print(f"\033[92mCache Hit: [Start: {block.start}, Size: {block.valid_block_size}]\033[00m")
+        print(f"\033[92mCache Hit: [{block.start}, {block.start + block_size}]\033[00m")
       
       
-  satisfied_requests.insert_satisfied_request(selected_request.sequence, cached_blocks)
+  satisfied_requests.insert_satisfied_read_request(selected_request.sequence, True, cached_blocks)
   selected_request.block_application_semaphore.release()
 
 
-
-
 def handle_write(selected_request):
-  request_type, file_id, block_size, fp_position, buffer_to_write, bytes_to_write = selected_request.fields
-  print(request_type, file_id, fp_position, buffer_to_write, bytes_to_write)
+  request_type, file_id, reincarnation_number, block_size, fp_position, buffer_to_write, bytes_to_write = selected_request.fields
+  bytes_written = -1
   
   
-  write_data_request = Request(request_type, file_id, fp_position, bytes_to_write, buffer_to_write, block_size)
+  write_data_request = Request(request_type, file_id, reincarnation_number, fp_position, bytes_to_write, buffer_to_write, block_size)
   write_data_request.request_socket_fd.sendto(write_data_request.request, (SERVER_IP, SERVER_PORT))
   
   cached_blocks = cache.get_blocks(file_id, fp_position, bytes_to_write)
   for block in cached_blocks:    
     # Wait for the Respose
+    print("waitingggg")
     response, _ = write_data_request.request_socket_fd.recvfrom(PACKET_LENGTH)
     response_fields = Request.parse_request(response)
-    if len(response_fields) > 2:  
+    if len(response_fields) == 5:  
       print(response_fields)
-      response_type, status, t_modified, data = response_fields 
+      response_type, status, t_modified, bytes_written, data = response_fields 
       
       block.valid_block_size = len(data)
       block.t_fresh = time.time() + cache.fresh_t
@@ -171,8 +192,16 @@ def handle_write(selected_request):
       else:
         # Update Block
         selected_block.update_block(block.valid_block_size, block.t_fresh, block.t_modified, block.data)
+    else:
+      if DEBUG:
+        print(response_fields)
+      
+      satisfied_requests.insert_satisfied_write_request(selected_request.sequence, False, -1)
+      selected_request.block_application_semaphore.release()
+      return
   
-  
+  print(int(bytes_written.decode()))
+  satisfied_requests.insert_satisfied_write_request(selected_request.sequence, True, int(bytes_written.decode()))
   selected_request.block_application_semaphore.release()
   
   for block in cache.blocks:
@@ -192,7 +221,7 @@ def requests_handler():
     requests_container.pending_requests_mutex.release()
 
     request_type, *_ = selected_request.fields
-    print(request_type)
+    
     if request_type == 'LOOKUP_REQ':
       handle_lookup(selected_request=selected_request)
     elif request_type == 'READ_REQ':
@@ -232,27 +261,37 @@ def nfs_init(server_ip, server_port, cache_blocks, block_size, fresh_t):
 
 
 def nfs_open(path, flags):
-  requests_container.insert_request(Request('LOOKUP_REQ', path, flags))
+  request = Request('LOOKUP_REQ', path, flags)
+  requests_container.insert_request(request)
+  
+  # Check Request Status
+  satisfied_request = satisfied_requests.get_satisfied_lookup_request(request.sequence)
+  if not satisfied_request:
+    return -1
+  elif not satisfied_request.status:
+    return -1
+  
   return files_container.get_fd_from_path(path)
   
-
-
-
 
 def nfs_read(fd, length):
   selected_file = files_container.get_file_from_fd(fd)
   file_id = selected_file.file_id
+  reincarnation_number = selected_file.get_reincarnation_number(fd)
   position = selected_file.get_position(fd)
   block_size = cache.block_size
   
-  request = Request('READ_REQ', file_id, block_size, position, length)
+  request = Request('READ_REQ', file_id, reincarnation_number, block_size, position, length)
   requests_container.insert_request(request)
   
-  satisfied_request = satisfied_requests.get_satisfied_request(request.sequence)
+  satisfied_request = satisfied_requests.get_satisfied_read_request(request.sequence)
+  if not satisfied_request.status:
+    return '', -1
+  
   data, length = satisfied_request.get_data(position, length)
   
   # The FP MUST NOT Surpass the File Size
-  files_container.update_position_by_file(selected_file, fd, position + length)
+  files_container.update_position_by_fd(selected_file, fd, position + length)
   # print(selected_file.get_position(fd))
   
   return data, length
@@ -262,13 +301,23 @@ def nfs_read(fd, length):
 def nfs_write(fd, buffer, length):
   selected_file = files_container.get_file_from_fd(fd)
   file_id = selected_file.file_id
+  reincarnation_number = selected_file.get_reincarnation_number(fd)
   position = selected_file.get_position(fd)
   block_size = cache.block_size
   
-  request = Request('WRITE_REQ', file_id, block_size, position, buffer, length)
+  request = Request('WRITE_REQ', file_id, reincarnation_number, block_size, position, buffer, length)
   requests_container.insert_request(request)
-  print("Write Complete")
   
+  
+  
+  satisfied_request = satisfied_requests.get_satisfied_write_request(request.sequence)
+  if not satisfied_request.status:
+    return -1
+  
+  files_container.update_position_by_fd(selected_file, fd, position + satisfied_request.bytes_written)
+  
+  
+  return satisfied_request.bytes_written
 
 def nfs_seek(fd, offset, whence):
   selected_file = files_container.get_file_from_fd(fd)
@@ -281,8 +330,7 @@ def nfs_seek(fd, offset, whence):
   elif whence == SEEK_END: # MUST BE CHANGED ERROR
     position = -1
   
-  print(position)
-  files_container.update_position_by_file(selected_file, fd, position)
+  files_container.update_position_by_fd(selected_file, fd, position)
   
   
 def nfs_ftruncate(fd, length):
