@@ -51,7 +51,13 @@ void lookup_handler(request_t *selected_request){
   int fields_length;
 
   file_path   = selected_request->fields[1].field;
-  flags       = atoi(selected_request->fields[2].field);
+  // Server will Ignore this Value
+  flags       = atoi(selected_request->fields[2].field); 
+ 
+  // Response Type
+  strcpy(response_fields[0].field, "LOOKUP_RES");
+  response_fields[0].length = strlen(response_fields[0].field);
+      
 
 
   // Search if File is Already Open
@@ -63,6 +69,29 @@ void lookup_handler(request_t *selected_request){
     
     if(!strcmp(file_container->files[i]->file_path, file_path)){
       file_id = file_container->files[i]->file_id;
+      
+      // Close and Reopen File with Different Flags
+      close(file_container->files[i]->file_fd);
+      
+      // Update Flags
+      file_container->files[i]->flags = file_container->files[i]->flags | flags;
+      file_container->files[i]->file_fd = open(file_path, file_container->files[i]->flags); 
+      if(file_container->files[i]->file_fd < 0){
+        // Response Status
+        strcpy(response_fields[1].field, "NACK");
+        response_fields[1].length = strlen(response_fields[1].field);
+        
+        // Total Fields
+        fields_length = 2;
+
+        // Serialize Response from Fields
+        serialized_response = serialize_request(response_fields, fields_length, &response_length);
+        
+        // Send Response
+        sendto(unicast_socket_fd, serialized_response, response_length * sizeof(char), 0, &selected_request->source, selected_request->address_length);
+        return;
+      }
+      
       break;
     }
   }
@@ -81,6 +110,7 @@ void lookup_handler(request_t *selected_request){
       strcpy(file->file_path, file_path);
       file->file_id = file_container->current_id;
       file->file_fd = fd;
+      file->flags = flags;
       memset(file->blocks, 0, SIZE * sizeof(block_t *));
 
       file_container->files[file_container->length] = file;
@@ -89,10 +119,7 @@ void lookup_handler(request_t *selected_request){
     }
   }
 
-  // Response Type
-  strcpy(response_fields[0].field, "LOOKUP_RES");
-  response_fields[0].length = strlen(response_fields[0].field);
-      
+  
   // Set Response
   if(file_id < 0){
     // Response Status
@@ -282,6 +309,9 @@ void write_handler(request_t *selected_request){
   int t_modified; 
   block_t *selected_block;
   int start;
+  int end;
+  int bof;
+  int eof;
   int empty_block_position;
   char t_modified_string[SIZE];
 
@@ -300,6 +330,9 @@ void write_handler(request_t *selected_request){
   buffer_to_write       = selected_request->fields[5].field;
   block_size            = atoi(selected_request->fields[6].field);
   
+  bof = -1;
+  eof = -1;
+
   if(reincarnation_number != current_reincarnation_number){
     strcpy(response_fields[1].field, "NACK");
     response_fields[1].length = strlen(response_fields[1].field);
@@ -323,7 +356,16 @@ void write_handler(request_t *selected_request){
       fields_length = 3;
     }
     else {
-      lseek(file_container->files[file_index]->file_fd, fp_position, SEEK_SET);
+      // SEEK_END
+      if(fp_position < 0){
+        bof = lseek(file_container->files[file_index]->file_fd, (size_t) 0, SEEK_SET);
+        eof   = lseek(file_container->files[file_index]->file_fd, (size_t) 0, SEEK_END);
+        fp_position = eof - bof;
+      }
+      else {
+        lseek(file_container->files[file_index]->file_fd, fp_position, SEEK_SET);
+      }
+
       bytes_written = write(file_container->files[file_index]->file_fd, buffer_to_write, bytes_to_write);
       if(bytes_written < 0){
         strcpy(response_fields[1].field, "NACK");
@@ -358,6 +400,29 @@ void write_handler(request_t *selected_request){
             start--;
           }
 
+          end = fp_position + bytes_to_write;
+          while (end % block_size){
+            end++;
+          }
+          
+          // Update Overlaping Blocks
+          for(int j = 0; file_container->files[file_index]->blocks[j] != NULL; j++){
+            // Current Start of Block is Larger than the End of Checking Block
+            if(start > file_container->files[file_index]->blocks[j]->end){
+              continue;
+            }
+            // Current End of Block is Smaller than the Start of Checking Block
+            else if(end < file_container->files[file_index]->blocks[j]->start){
+              continue;
+            }
+
+            // Blocks Overlap
+            file_container->files[file_index]->blocks[j]->t_modified = t_modified;
+            
+            printf("Current Write Operation: %d %d\n", start, end);
+            printf("Blocks Updated: %d %d\n", file_container->files[file_index]->blocks[j]->start, file_container->files[file_index]->blocks[j]->end);
+          }
+
           // Response Type
           strcpy(response_fields[0].field, "WRITE_RES");
           response_fields[0].length = strlen(response_fields[0].field);
@@ -375,19 +440,18 @@ void write_handler(request_t *selected_request){
           response_fields[3].length = strlen(response_fields[3].field);
 
           // Insert or Update Block and Send to Client
-          for(int i = 0; i < (int) ceil((double) bytes_to_write / block_size); i++){
+          for(int i = 0; i < (int) ceil((double) (end - start) / block_size); i++){
             selected_block = get_block_from_file(file_container->files[file_index], start + block_size * i);
             if(!selected_block){
               empty_block_position = get_emtpy_block_position(file_container->files[file_index]);
               
               file_container->files[file_index]->blocks[empty_block_position] = (block_t *) malloc(sizeof(block_t));
               file_container->files[file_index]->blocks[empty_block_position]->start = start + block_size * i;
+              file_container->files[file_index]->blocks[empty_block_position]->end = file_container->files[file_index]->blocks[empty_block_position]->start + block_size;
               file_container->files[file_index]->blocks[empty_block_position]->t_modified = t_modified;
-              // printf("Not Exists\n");
             }
             else {
               selected_block->t_modified = t_modified;
-              // printf("Exists\n");
             }
 
             // Read Modified Blocks
@@ -402,24 +466,23 @@ void write_handler(request_t *selected_request){
             }
             response_fields[4].length = bytes_read;
 
+            // EOF for SEEK_END
+            sprintf(response_fields[5].field, "%d", eof);
+            response_fields[5].length = strlen(response_fields[5].field);
+
             // Length of Fields
-            fields_length = 5;
+            fields_length = 6;
 
             // Serialize Response from Fields
             serialized_response = serialize_request(response_fields, fields_length, &response_length);
 
             // Send Response
             sendto(unicast_socket_fd, serialized_response, response_length * sizeof(char), 0, &selected_request->source, selected_request->address_length);
-
           }
         }
       }
-    }
-
-    
+    } 
   }
-  
-
 }
 
 

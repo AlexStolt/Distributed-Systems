@@ -1,14 +1,6 @@
 from turtle import position
 from classes import *
 
-# File Operations
-O_RDONLY  =   0
-O_WRONLY  =   1
-O_RDWR    =   2
-O_CREAT   =   100
-O_EXCL    =   200
-O_TRUNC   =   1000
-
 
 # Whence Identifiers
 SEEK_SET = 0
@@ -39,11 +31,14 @@ def handle_lookup_locally(selected_request):
     return False
   
   # Append FD
-  files_container.append_file(selected_file.file_path, selected_file.file_path, files_container.reincarnation_count)
+  files_container.append_file(selected_file.file_path, selected_file.file_path, files_container.reincarnation_count, flags)
   return True
 
 
 def handle_lookup(selected_request):
+  request_fields = selected_request.fields
+  header, file_path, flags = request_fields
+  
   # Try to Satisfy Request without Contacting the Server
   if handle_lookup_locally(selected_request):
     # Notify that the Request was Successfull and Unblock Application
@@ -72,7 +67,7 @@ def handle_lookup(selected_request):
     return
   
   # Append File
-  files_container.append_file(file_path.decode(), int(file_id.decode()), int(reincarnation_number.decode()))
+  files_container.append_file(file_path.decode(), int(file_id.decode()), int(reincarnation_number.decode()), flags)
   
   # Notify that the Request was Successfull and Unblock Application
   satisfied_requests.insert_satisfied_lookup_request(request_sequence=selected_request.sequence, status=True)
@@ -80,7 +75,7 @@ def handle_lookup(selected_request):
 
 
 def handle_read(selected_request):
-  request_type, file_id, reincarnation_number, block_size, fp_position, length = selected_request.fields
+  request_type, file_id, reincarnation_number, block_size, fp_position, length = selected_request.fields  
   
   # Get Blocks from Cache
   cached_blocks = cache.get_blocks(file_id, fp_position, length)
@@ -163,7 +158,6 @@ def handle_read(selected_request):
 
 def handle_write(selected_request):
   request_type, file_id, reincarnation_number, block_size, fp_position, buffer_to_write, bytes_to_write = selected_request.fields
-  bytes_written = -1
   
   
   write_data_request = Request(request_type, file_id, reincarnation_number, fp_position, bytes_to_write, buffer_to_write, block_size)
@@ -172,12 +166,11 @@ def handle_write(selected_request):
   cached_blocks = cache.get_blocks(file_id, fp_position, bytes_to_write)
   for block in cached_blocks:    
     # Wait for the Respose
-    print("waitingggg")
     response, _ = write_data_request.request_socket_fd.recvfrom(PACKET_LENGTH)
     response_fields = Request.parse_request(response)
-    if len(response_fields) == 5:  
-      print(response_fields)
-      response_type, status, t_modified, bytes_written, data = response_fields 
+    
+    if len(response_fields) == 6:  
+      response_type, status, t_modified, bytes_written, data, eof = response_fields 
       
       block.valid_block_size = len(data)
       block.t_fresh = time.time() + cache.fresh_t
@@ -194,18 +187,15 @@ def handle_write(selected_request):
         selected_block.update_block(block.valid_block_size, block.t_fresh, block.t_modified, block.data)
     else:
       if DEBUG:
-        print(response_fields)
+        print('Error:', response_fields)
       
-      satisfied_requests.insert_satisfied_write_request(selected_request.sequence, False, -1)
+      satisfied_requests.insert_satisfied_write_request(selected_request.sequence, False, -1, -1)
       selected_request.block_application_semaphore.release()
       return
   
-  print(int(bytes_written.decode()))
-  satisfied_requests.insert_satisfied_write_request(selected_request.sequence, True, int(bytes_written.decode()))
-  selected_request.block_application_semaphore.release()
   
-  for block in cache.blocks:
-    print(block)
+  satisfied_requests.insert_satisfied_write_request(selected_request.sequence, True, int(bytes_written.decode()), int(eof))
+  selected_request.block_application_semaphore.release()
   
   
   
@@ -231,11 +221,6 @@ def requests_handler():
 
     
     
-
-
-
-
-
 
 
 def nfs_init(server_ip, server_port, cache_blocks, block_size, fresh_t):
@@ -276,9 +261,15 @@ def nfs_open(path, flags):
 
 def nfs_read(fd, length):
   selected_file = files_container.get_file_from_fd(fd)
+  position = selected_file.get_position(fd)
+  
+  # Check Read Permission and Position in File
+  if not selected_file.check_read_permission(fd) or position < 0:
+    return '', -1
+  
   file_id = selected_file.file_id
   reincarnation_number = selected_file.get_reincarnation_number(fd)
-  position = selected_file.get_position(fd)
+  
   block_size = cache.block_size
   
   request = Request('READ_REQ', file_id, reincarnation_number, block_size, position, length)
@@ -300,6 +291,12 @@ def nfs_read(fd, length):
 
 def nfs_write(fd, buffer, length):
   selected_file = files_container.get_file_from_fd(fd)
+  
+  # Check Write Permission
+  if not selected_file.check_write_permission(fd):
+    return -1
+  
+  
   file_id = selected_file.file_id
   reincarnation_number = selected_file.get_reincarnation_number(fd)
   position = selected_file.get_position(fd)
@@ -309,11 +306,12 @@ def nfs_write(fd, buffer, length):
   requests_container.insert_request(request)
   
   
-  
   satisfied_request = satisfied_requests.get_satisfied_write_request(request.sequence)
   if not satisfied_request.status:
     return -1
-  
+  if position < 0:
+    position = satisfied_request.eof
+    
   files_container.update_position_by_fd(selected_file, fd, position + satisfied_request.bytes_written)
   
   
@@ -327,7 +325,7 @@ def nfs_seek(fd, offset, whence):
     position = offset
   elif whence == SEEK_CUR:
     position = selected_file.get_position(fd) + offset
-  elif whence == SEEK_END: # MUST BE CHANGED ERROR
+  elif whence == SEEK_END:
     position = -1
   
   files_container.update_position_by_fd(selected_file, fd, position)

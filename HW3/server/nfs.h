@@ -51,6 +51,7 @@ typedef struct requests_list {
 
 typedef struct block {
   int start;
+  int end;
   int t_modified;
 } block_t;
 
@@ -58,6 +59,7 @@ typedef struct file {
   char file_path[SIZE];
   int file_id;
   int file_fd;
+  int flags;
   block_t *blocks[SIZE];
 } file_t;
 

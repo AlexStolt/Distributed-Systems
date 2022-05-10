@@ -5,6 +5,15 @@ import copy
 import sys
 
 
+# File Operations
+O_RDONLY  =   0 # POSSIBLE BUG
+O_WRONLY  =   1
+O_RDWR    =   2
+O_CREAT   =   100
+O_EXCL    =   200
+O_TRUNC   =   1000
+
+
 SEPERATOR = '\0'
 
 class Cache:
@@ -58,10 +67,12 @@ class Cache:
     while start % self.block_size:
       start = start - 1
     
+    
     # End of Block
     end = position + length
     while end % self.block_size:
       end = end + 1
+    
     
     start_position = start
     for _ in range(int((end - start) / self.block_size)):
@@ -82,6 +93,7 @@ class Cache:
         requested_blocks[block_index] = copy.deepcopy(block)
     
     self.cache_mutex.release()
+    
     return requested_blocks
 
 
@@ -198,9 +210,9 @@ class SatisfiedRequests():
     return None
   
   
-  def insert_satisfied_write_request(self, request_sequence, status: bool, bytes_written: int):
+  def insert_satisfied_write_request(self, request_sequence, status: bool, bytes_written: int, eof: int):
     self.satisfied_write_requests_mutex.acquire()
-    self.satisfied_write_requests.append(self.SatisfiedWriteRequest(request_sequence, status, bytes_written))
+    self.satisfied_write_requests.append(self.SatisfiedWriteRequest(request_sequence, status, bytes_written, eof))
     self.satisfied_write_requests_mutex.release()
   
   
@@ -251,9 +263,10 @@ class SatisfiedRequests():
 
 
   class SatisfiedWriteRequest:
-    def __init__(self, request_sequence, status, bytes_written):
+    def __init__(self, request_sequence, status, bytes_written, eof):
       self.request_sequence = request_sequence
       self.status = status
+      self.eof = eof
       self.bytes_written = bytes_written
 
 class Request:
@@ -311,7 +324,7 @@ class Files:
     self.files_mutex = threading.Lock()
 
 # Append a File to the Files Container
-  def append_file(self, file_path: str, file_id: int, reincarnation_number: int):
+  def append_file(self, file_path: str, file_id: int, reincarnation_number: int, flags: int):
     self.files_mutex.acquire()
 
     # Used when handling lookup locally
@@ -323,7 +336,7 @@ class Files:
         continue
       
       # ID Already Exists
-      file.add_fd(self.fd_count, reincarnation_number)
+      file.add_fd(self.fd_count, flags, reincarnation_number)
       self.fd_count = self.fd_count + 1
       
       self.files_mutex.release()
@@ -333,6 +346,7 @@ class Files:
     self.files.append(self.File(
       file_path = file_path,
       file_id = file_id,
+      flags=flags,
       file_fd = self.fd_count,
       reincarnation_number=reincarnation_number
     ))
@@ -349,12 +363,12 @@ class Files:
       if file.file_path != file_path:
         continue 
       
-      for fd in file.file_fds:
-        if fd['position'] < 0:
+      for i, fd in enumerate(file.file_fds):
+        if fd['position'] < 0 and not fd['eof']:
           fd['position'] = 0
           
           self.files_mutex.release()
-          return fd['fd']
+          return fd['fd'] 
     
     self.files_mutex.release()
     return -1
@@ -426,22 +440,43 @@ class Files:
 
   class File:
     file_fds = []
-    def __init__(self, file_path, file_id, file_fd, reincarnation_number):
+    def __init__(self, file_path, file_id, file_fd, flags, reincarnation_number):
       self.file_path = file_path
       self.file_id = file_id
       self.file_fds.append({
         'fd': file_fd,
         'reincarnation_number': reincarnation_number,
-        'position': -1
+        'flags': flags,
+        'position': -1,
+        'eof': False
       })
 
-    def add_fd(self, file_fd, reincarnation_number):
+    def add_fd(self, file_fd, flags, reincarnation_number):
       self.file_fds.append({
         'fd': file_fd,
         'reincarnation_number': reincarnation_number,
-        'position': -1
+        'flags': flags,
+        'position': -1,
+        'eof': False
       })
 
+
+    def check_read_permission(self, file_fd: int):
+      index = self.fd_index(file_fd)
+      
+      if self.file_fds[index]['flags'] & O_RDONLY == O_RDONLY or self.file_fds[index]['flags'] & O_RDWR == O_RDWR:
+        return True
+      return False
+    
+    
+    def check_write_permission(self, file_fd: int):
+      index = self.fd_index(file_fd)
+      
+      if self.file_fds[index]['flags'] & O_WRONLY == O_WRONLY or self.file_fds[index]['flags'] & O_RDWR == O_RDWR:
+        return True
+      return False
+    
+    
     def contains(self, file_fd):
       for fd in self.file_fds:
         if fd['fd'] != file_fd:
@@ -475,5 +510,7 @@ class Files:
         if fd['fd'] != file_fd:
           continue
         fd['position'] = position
+        if position < 0:
+          fd['eof'] = True
         return True
       return False
