@@ -167,7 +167,10 @@ void read_handler(request_t *selected_request){
   ssize_t bytes_read;
   block_t *selected_block;
   bool block_modified;
+  int block_modified_time;
   char t_modified_string[SIZE];
+  int start;
+  int end;
 
   // Response
   char *serialized_response;
@@ -227,13 +230,35 @@ void read_handler(request_t *selected_request){
       }
       else {
         memset(read_buffer, 0, block_size * sizeof(char));
-        
-        // Check if block was modified
+        start = block_start;
+        end = start + block_size;
+
+        // Find Block (Overlap) and check if block was modified
+        // selected_block = get_block_from_file(file_container->files[file_index], block_start);
+        selected_block = NULL;
         block_modified = false;
-        selected_block = get_block_from_file(file_container->files[file_index], block_start);
-        if(selected_block != NULL){
-          if (t_modified < selected_block->t_modified){
+        block_modified_time = -1;
+        for(int j = 0; j < SIZE; j++){
+          if(!file_container->files[file_index]->blocks[j]){
+            continue;
+          }
+          // Current Start of Block is Larger than the End of Checking Block
+          if(start > file_container->files[file_index]->blocks[j]->end){
+            continue;
+          }
+          // Current End of Block is Smaller than the Start of Checking Block
+          else if(end < file_container->files[file_index]->blocks[j]->start){
+            continue;
+          }
+
+          // Blocks Overlaps and Maximum Modified Time is Selected
+          
+          if (t_modified < file_container->files[file_index]->blocks[j]->t_modified){
             block_modified = true;
+            if (block_modified_time < file_container->files[file_index]->blocks[j]->t_modified){
+              block_modified_time = file_container->files[file_index]->blocks[j]->t_modified;
+              selected_block = file_container->files[file_index]->blocks[j];
+            }
           }
         }
 
@@ -359,7 +384,7 @@ void write_handler(request_t *selected_request){
       // SEEK_END
       if(fp_position < 0){
         bof = lseek(file_container->files[file_index]->file_fd, (size_t) 0, SEEK_SET);
-        eof   = lseek(file_container->files[file_index]->file_fd, (size_t) 0, SEEK_END);
+        eof = lseek(file_container->files[file_index]->file_fd, (size_t) 0, SEEK_END);
         fp_position = eof - bof;
       }
       else {
@@ -404,9 +429,12 @@ void write_handler(request_t *selected_request){
           while (end % block_size){
             end++;
           }
-          
+          printf("%d %d\n", start, end);
           // Update Overlaping Blocks
-          for(int j = 0; file_container->files[file_index]->blocks[j] != NULL; j++){
+          for(int j = 0; j < SIZE; j++){
+            if(!file_container->files[file_index]->blocks[j]){
+              continue;
+            }
             // Current Start of Block is Larger than the End of Checking Block
             if(start > file_container->files[file_index]->blocks[j]->end){
               continue;
@@ -486,6 +514,102 @@ void write_handler(request_t *selected_request){
 }
 
 
+void truncate_handler(request_t *selected_request){
+  int file_id, reincarnation_number, length;
+  int truncate_status;
+  int file_index;
+  int t_modified;
+
+  // Response
+  char *serialized_response;
+  field_t response_fields[SIZE];
+  int response_length;
+  int fields_length;
+
+
+  file_id               = atoi(selected_request->fields[1].field);
+  reincarnation_number  = atoi(selected_request->fields[2].field);
+  length                = atoi(selected_request->fields[3].field);
+
+
+  // Response Type
+  strcpy(response_fields[0].field, "TRUNCATE_RES");
+  response_fields[0].length = strlen(response_fields[0].field);
+
+  // Check Reincarnation
+  if(reincarnation_number != current_reincarnation_number){
+    strcpy(response_fields[1].field, "NACK");
+    response_fields[1].length = strlen(response_fields[1].field);
+
+    strcpy(response_fields[2].field, "INVALID REINCARNATION NUMBER");
+    response_fields[2].length = strlen(response_fields[2].field);
+
+    // Total Fields
+    fields_length = 3;
+  }
+  else {
+    // Find FD from ID
+    file_index = get_fd_by_id(file_container, file_id);
+    if(file_index < 0){
+      strcpy(response_fields[1].field, "NACK");
+      response_fields[1].length = strlen(response_fields[1].field);
+
+      strcpy(response_fields[2].field, "FILE NOT FOUND");
+      response_fields[2].length = strlen(response_fields[2].field);
+
+      // Total Fields
+      fields_length = 3;
+    }
+    else {
+      // Truncate File
+      truncate_status = ftruncate(file_container->files[file_index]->file_fd, length);
+      if(truncate_status < 0){
+        strcpy(response_fields[1].field, "NACK");
+        response_fields[1].length = strlen(response_fields[1].field);
+
+        strcpy(response_fields[2].field, "TRUNCATE RETURN -1");
+        response_fields[2].length = strlen(response_fields[2].field);
+
+        // Total Fields
+        fields_length = 3;
+      }
+      else {
+        strcpy(response_fields[1].field, "ACK");
+        response_fields[1].length = strlen(response_fields[1].field);
+
+        // Set Updated Modified Time
+        t_modified = time(NULL);
+        sprintf(response_fields[2].field, "%d", t_modified);
+        response_fields[2].length = strlen(response_fields[2].field);
+
+        // Total Fields
+        fields_length = 3;
+        
+        // Update Modified Blocks
+        for(int i = 0; i < SIZE; i++){
+          if(!file_container->files[file_index]->blocks[i]){
+            continue;
+          }
+          // Current Length of File is Larger than the End of Checking Block
+          if(length >= file_container->files[file_index]->blocks[i]->end){
+            printf("Skip %d %d\n", file_container->files[file_index]->blocks[i]->start, file_container->files[file_index]->blocks[i]->end);
+            continue;
+          }
+          file_container->files[file_index]->blocks[i]->t_modified = t_modified;
+          printf("Truncate %d %d\n", file_container->files[file_index]->blocks[i]->start, file_container->files[file_index]->blocks[i]->end);
+        }
+      }
+    }
+  }
+
+  // Serialize Response from Fields
+  serialized_response = serialize_request(response_fields, fields_length, &response_length);
+  
+  // Send Response
+  sendto(unicast_socket_fd, serialized_response, response_length * sizeof(char), 0, &selected_request->source, selected_request->address_length);
+}
+
+
 void *udp_requests_handler(void *arguments){
   request_t *selected_request;
   char *request_type;
@@ -508,6 +632,9 @@ void *udp_requests_handler(void *arguments){
     }
     else if(!strcmp(request_type, "WRITE_REQ")){
       write_handler(selected_request);
+    }
+    else if(!strcmp(request_type, "TRUNCATE_REQ")){
+      truncate_handler(selected_request);
     }
   }
 }

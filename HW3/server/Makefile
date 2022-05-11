@@ -1,6 +1,7 @@
 all:  nfs_server_app.o nfs_server_utils.o helper_utils.o nfs.h
 	gcc -g -Wall nfs_server_app.o nfs_server_utils.o helper_utils.o -o server.out -lpthread -lm
-
+	rm files/*.txt
+	
 nfs_server_app.o: nfs_server_app.c nfs.h
 	gcc -g -Wall -c nfs_server_app.c -o nfs_server_app.o -lpthread -lm
 
