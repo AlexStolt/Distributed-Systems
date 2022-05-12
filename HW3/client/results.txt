@@ -1,0 +1,13 @@
+blocks: 16 block size: 16 refresh: 2
+0.004387468999993871
+
+blocks: 16 block size: 32 refresh: 2
+
+
+blocks: 16 block size: 64 refresh: 2
+
+
+blocks: 32 block size: 16 refresh: 2
+
+
+blocks: 64 block size: 16 refresh: 2

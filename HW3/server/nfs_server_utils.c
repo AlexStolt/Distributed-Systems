@@ -111,7 +111,10 @@ void lookup_handler(request_t *selected_request){
       file->file_id = file_container->current_id;
       file->file_fd = fd;
       file->flags = flags;
-      memset(file->blocks, 0, SIZE * sizeof(block_t *));
+      for(int i = 0; i < SIZE; i++){
+        file->blocks[i] = NULL;
+      }
+
 
       file_container->files[file_container->length] = file;
       file_container->length++;
@@ -252,7 +255,6 @@ void read_handler(request_t *selected_request){
           }
 
           // Blocks Overlaps and Maximum Modified Time is Selected
-          
           if (t_modified < file_container->files[file_index]->blocks[j]->t_modified){
             block_modified = true;
             if (block_modified_time < file_container->files[file_index]->blocks[j]->t_modified){
@@ -339,6 +341,8 @@ void write_handler(request_t *selected_request){
   int eof;
   int empty_block_position;
   char t_modified_string[SIZE];
+  int is_eof;
+  char *eof_flag;
 
   // Response
   char *serialized_response;
@@ -350,11 +354,14 @@ void write_handler(request_t *selected_request){
   // Request Fields
   file_id               = atoi(selected_request->fields[1].field);
   reincarnation_number  = atoi(selected_request->fields[2].field);
-  fp_position           = atoi(selected_request->fields[3].field);
-  bytes_to_write        = atoi(selected_request->fields[4].field);
-  buffer_to_write       = selected_request->fields[5].field;
-  block_size            = atoi(selected_request->fields[6].field);
+  eof_flag              = selected_request->fields[3].field;
+  fp_position           = atoi(selected_request->fields[4].field);
+  bytes_to_write        = atoi(selected_request->fields[5].field);
+  buffer_to_write       = selected_request->fields[6].field;
+  block_size            = atoi(selected_request->fields[7].field);
   
+  
+
   bof = -1;
   eof = -1;
 
@@ -382,15 +389,13 @@ void write_handler(request_t *selected_request){
     }
     else {
       // SEEK_END
-      if(fp_position < 0){
+      if(!strcmp("eof", eof_flag)){
         bof = lseek(file_container->files[file_index]->file_fd, (size_t) 0, SEEK_SET);
         eof = lseek(file_container->files[file_index]->file_fd, (size_t) 0, SEEK_END);
-        fp_position = eof - bof;
+        fp_position += (eof - bof);        
       }
-      else {
-        lseek(file_container->files[file_index]->file_fd, fp_position, SEEK_SET);
-      }
-
+      
+      lseek(file_container->files[file_index]->file_fd, fp_position, SEEK_SET);
       bytes_written = write(file_container->files[file_index]->file_fd, buffer_to_write, bytes_to_write);
       if(bytes_written < 0){
         strcpy(response_fields[1].field, "NACK");
@@ -420,7 +425,12 @@ void write_handler(request_t *selected_request){
           t_modified = time(NULL);
           sprintf(t_modified_string, "%d", t_modified);
 
-          start = fp_position;
+          if(!strcmp("eof", eof_flag)){
+            start = eof;
+          }
+          else {
+            start = fp_position;
+          }
           while (start % block_size){
             start--;
           }
@@ -446,9 +456,6 @@ void write_handler(request_t *selected_request){
 
             // Blocks Overlap
             file_container->files[file_index]->blocks[j]->t_modified = t_modified;
-            
-            printf("Current Write Operation: %d %d\n", start, end);
-            printf("Blocks Updated: %d %d\n", file_container->files[file_index]->blocks[j]->start, file_container->files[file_index]->blocks[j]->end);
           }
 
           // Response Type
@@ -467,6 +474,15 @@ void write_handler(request_t *selected_request){
           sprintf(response_fields[3].field, "%d", bytes_written);
           response_fields[3].length = strlen(response_fields[3].field);
 
+
+          /* [IMPORTANT NOTE]
+            Multiple overlapping blocks may be inserted. This is not and error since these blocks
+            are checked only when read operations are performed. When reading all overlapping blocks are
+            checked. If at least one (overlaping) modified block is found then the block was for sure modified.
+            If multiple blocks are found th modified time is the maximum between all the blocks modified.
+            Not the most elegant solution but works for dynamic block size specified by the client side.  
+          */
+         
           // Insert or Update Block and Send to Client
           for(int i = 0; i < (int) ceil((double) (end - start) / block_size); i++){
             selected_block = get_block_from_file(file_container->files[file_index], start + block_size * i);

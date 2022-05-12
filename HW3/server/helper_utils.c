@@ -61,9 +61,11 @@ block_t *get_block_from_file(file_t *file, int start){
   int i;
 
   i = 0;
-  while(file->blocks[i]){
+  while(file->blocks[i] != NULL){
     if(file->blocks[i]->start != start){
+      printf("%d - %d\n", file->blocks[i]->start, start);
       i++;
+      
       continue;
     }
     return file->blocks[i];

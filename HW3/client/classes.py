@@ -52,12 +52,16 @@ class Cache:
       
       #  Remove Block from Cache
       if block_index != -1:
+        start = self.blocks[block_index].start
+        end = self.blocks[block_index].start + self.block_size
+        print(f'\033[35mLRU Removes [{start}, {end}]\033[00m')
         self.blocks.pop(block_index)
-        
+         
     if len(self.blocks) != self.cache_blocks:
       self.blocks.append(block)
     
     self.cache_mutex.release()
+
     
   def get_blocks(self, file_id: int, position: int, length: int):
     requested_blocks = []
@@ -97,6 +101,17 @@ class Cache:
     return requested_blocks
 
 
+  def truncate_reset_blocks(self, file_id: int, t_modified: int, t_fresh: int, length: int):
+    self.cache_mutex.acquire()
+    for block in self.blocks:
+      if block.file_id != file_id:
+        continue
+      
+      if block.is_valid:
+        if block.start + block.valid_block_size > length:
+          block.update_block(valid_block_size=0, t_fresh=t_fresh, t_modified=t_modified, data='') 
+    self.cache_mutex.release()
+  
   
 class Block:
   def __init__(self, file_id, start, valid_block_size, t_fresh, data):
@@ -165,11 +180,12 @@ class SatisfiedRequests():
     self.satisfied_read_requests    = []
     self.satisfied_lookup_requests  = []
     self.satisfied_write_requests   = []
+    self.satisfied_truncate_requests   = []
     
-    
-    self.satisfied_read_requests_mutex    = threading.Lock()
-    self.satisfied_lookup_requests_mutex  = threading.Lock()
-    self.satisfied_write_requests_mutex   = threading.Lock()
+    self.satisfied_read_requests_mutex      = threading.Lock()
+    self.satisfied_lookup_requests_mutex    = threading.Lock()
+    self.satisfied_write_requests_mutex     = threading.Lock()
+    self.satisfied_truncate_requests_mutex  = threading.Lock()
     
     
   def insert_satisfied_lookup_request(self, request_sequence: int, status: bool):
@@ -229,6 +245,24 @@ class SatisfiedRequests():
     return None
   
   
+  def insert_satisfied_truncate_request(self, request_sequence: int, status: bool):
+    self.satisfied_truncate_requests_mutex.acquire()
+    self.satisfied_truncate_requests.append(self.SatisfiedTruncateRequest(request_sequence, status))
+    self.satisfied_truncate_requests_mutex.release()
+    
+    
+  def get_satisfied_truncate_request(self, request_sequence: int): 
+    self.satisfied_truncate_requests_mutex.acquire()
+    for request in self.satisfied_truncate_requests:
+      if request.request_sequence != request_sequence:
+        continue
+      
+      self.satisfied_truncate_requests_mutex.release()
+      return request
+      
+    self.satisfied_truncate_requests_mutex.release()
+    return None  
+  
   
   class SatisfiedLookupRequest:
     def __init__(self, request_sequence: int, status: bool):
@@ -268,6 +302,13 @@ class SatisfiedRequests():
       self.status = status
       self.eof = eof
       self.bytes_written = bytes_written
+
+
+  class SatisfiedTruncateRequest:
+    def __init__(self, request_sequence, status):
+      self.request_sequence = request_sequence
+      self.status = status
+      
 
 class Request:
   def __init__(self, *fields):
@@ -364,7 +405,7 @@ class Files:
         continue 
       
       for i, fd in enumerate(file.file_fds):
-        if fd['position'] < 0 and not fd['eof']:
+        if fd['position'] < 0 and fd['eof_offset'] == None:
           fd['position'] = 0
           
           self.files_mutex.release()
@@ -428,9 +469,9 @@ class Files:
     self.files_mutex.release()
     return None
 
-  def update_position_by_fd(self, file, fd, position):
+  def update_position_by_fd(self, file, fd, current_position: int, offset: int):
     self.files_mutex.acquire()
-    if file.update_position(fd, position):
+    if file.update_position(fd, current_position, offset):
       self.files_mutex.release()
       return True
     
@@ -448,69 +489,143 @@ class Files:
         'reincarnation_number': reincarnation_number,
         'flags': flags,
         'position': -1,
-        'eof': False
+        'eof_offset': None
       })
+      self.file_mutex = threading.Lock()
 
     def add_fd(self, file_fd, flags, reincarnation_number):
+      self.file_mutex.acquire()
+      
       self.file_fds.append({
         'fd': file_fd,
         'reincarnation_number': reincarnation_number,
         'flags': flags,
         'position': -1,
-        'eof': False
+        'eof_offset': None
       })
+      
+      self.file_mutex.release()
 
 
     def check_read_permission(self, file_fd: int):
       index = self.fd_index(file_fd)
       
+      self.file_mutex.acquire()
       if self.file_fds[index]['flags'] & O_RDONLY == O_RDONLY or self.file_fds[index]['flags'] & O_RDWR == O_RDWR:
+        self.file_mutex.release()
         return True
+      
+      self.file_mutex.release()
       return False
     
     
     def check_write_permission(self, file_fd: int):
       index = self.fd_index(file_fd)
       
+      self.file_mutex.acquire()
       if self.file_fds[index]['flags'] & O_WRONLY == O_WRONLY or self.file_fds[index]['flags'] & O_RDWR == O_RDWR:
+        self.file_mutex.release()
         return True
+      
+      self.file_mutex.release()
+      return False
+    
+    def check_truncate_permission(self, file_fd: int):
+      index = self.fd_index(file_fd)
+      
+      self.file_mutex.acquire()
+      if self.file_fds[index]['flags'] & O_TRUNC == O_TRUNC:
+        if self.file_fds[index]['flags'] & O_RDWR == O_RDWR or self.file_fds[index]['flags'] & O_WRONLY == O_WRONLY: 
+          self.file_mutex.release()
+          return True
+        
+      self.file_mutex.release()
       return False
     
     
     def contains(self, file_fd):
+      self.file_mutex.acquire()
+      
       for fd in self.file_fds:
         if fd['fd'] != file_fd:
           continue
+        
+        self.file_mutex.release()
         return True
+      
+      self.file_mutex.release()
       return False
 
+
     def fd_index(self, file_fd: int):
+      self.file_mutex.acquire()
+      
       for i, fd in enumerate(self.file_fds):
         if fd['fd'] != file_fd:
           continue
+        
+        self.file_mutex.release()
         return i
+      
+      self.file_mutex.release()
       return -1
+
+    def pop_fd(self, fd):
+      index = self.fd_index(fd)
+      if index < 0:
+        return -1
+      
+      self.file_mutex.acquire()
+      self.file_fds.pop(index)
+      self.file_mutex.release()
+
+      return 0
 
     def get_position(self, file_fd: int):
+      self.file_mutex.acquire()
       for fd in self.file_fds:
         if fd['fd'] != file_fd:
           continue
-        return fd['position']
+        
+        self.file_mutex.release()
+        return fd['position'], fd['eof_offset']
+      
+      self.file_mutex.release()
       return -1
+
 
     def get_reincarnation_number(self, file_fd: int):
+      self.file_mutex.acquire()
       for fd in self.file_fds:
         if fd['fd'] != file_fd:
           continue
+        
+        self.file_mutex.release()
         return fd['reincarnation_number']
+      
+      self.file_mutex.release()
       return -1
 
-    def update_position(self, file_fd: int, position: int):
+
+    def update_position(self, file_fd: int, current_position: int, offset: int):
+      self.file_mutex.acquire()
       for fd in self.file_fds:
         if fd['fd'] != file_fd:
           continue
-        fd['position'] = position
-        if position < 0:
-          fd['eof'] = True
+        
+        if current_position < 0:
+          fd['eof_offset'] = offset
+          fd['position'] = -1
+        else:
+          # Incvalid Position
+          if current_position + offset < 0:
+            break
+          
+          fd['eof_offset'] = None
+          fd['position'] = current_position + offset 
+          
+        self.file_mutex.release()
         return True
+      
+      self.file_mutex.release()
       return False

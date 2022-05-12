@@ -1,3 +1,4 @@
+from math import remainder
 from turtle import position
 from classes import *
 
@@ -6,6 +7,8 @@ from classes import *
 SEEK_SET = 0
 SEEK_CUR = 1
 SEEK_END = 2
+EOF = -1
+
 
 THREADS = 4
 
@@ -24,9 +27,18 @@ def handle_lookup_locally(selected_request):
   request_fields = selected_request.fields
   header, file_path, flags = request_fields
   
+  # Check Locally if File Already Exists with the same Permissions
+  files_container.files_mutex.acquire()
+  selected_file = None
+  for file in files_container.files:
+    for fd in file.file_fds:
+      if fd['flags'] & flags != flags:
+        continue
+      
+      selected_file = file
+      break
+  files_container.files_mutex.release()
   
-  # Check Locally if File Already Exists
-  selected_file = files_container.get_file_by_path(file_path)
   if not selected_file:
     return False
   
@@ -119,7 +131,11 @@ def handle_read(selected_request):
         block.valid_block_size = len(data)
         block.t_modified = int(t_modified)
         block.data = data
-      
+
+        if DEBUG:
+          if block.is_valid and not block.is_fresh:
+            print(f"\033[94mExpired Block was Modified: [{block.start}, {block.start + block_size}]\033[00m")
+          
       # NACK
       elif len(response_fields) == 3:
         if DEBUG:
@@ -133,8 +149,8 @@ def handle_read(selected_request):
       # ACK
       elif len(response_fields) == 2:
         if DEBUG:
-          print(f"\033[93mExpired Block not Modified: [{block.start}, {block.start + block_size}]\033[00m")
-      
+          print(f"\033[94mExpired Block was not Modified: [{block.start}, {block.start + block_size}]\033[00m")
+        pass
       
       # Refresh Block Freshness
       block.t_fresh = time.time() + cache.fresh_t
@@ -157,14 +173,36 @@ def handle_read(selected_request):
 
 
 def handle_write(selected_request):
-  request_type, file_id, reincarnation_number, block_size, fp_position, buffer_to_write, bytes_to_write = selected_request.fields
+  request_type, file_id, reincarnation_number, block_size, fp_position, eof_offset, buffer_to_write, bytes_to_write = selected_request.fields
+  
+  if fp_position < 0 or eof_offset != None:
+    write_data_request = Request(request_type, file_id, reincarnation_number, 'eof', eof_offset, bytes_to_write, buffer_to_write, block_size)
+  else:
+    write_data_request = Request(request_type, file_id, reincarnation_number, 'not_eof', fp_position, bytes_to_write, buffer_to_write, block_size)
   
   
-  write_data_request = Request(request_type, file_id, reincarnation_number, fp_position, bytes_to_write, buffer_to_write, block_size)
   write_data_request.request_socket_fd.sendto(write_data_request.request, (SERVER_IP, SERVER_PORT))
   
-  cached_blocks = cache.get_blocks(file_id, fp_position, bytes_to_write)
-  for block in cached_blocks:    
+  
+  # When a Request for the EOF is sent we must first get the position of EOF to calculate the blocks needed
+  if fp_position < 0 or eof_offset != None:
+    response, _ = write_data_request.request_socket_fd.recvfrom(PACKET_LENGTH)
+    response_fields = Request.parse_request(response)
+    
+    if len(response_fields) == 6:  
+      response_type, status, t_modified, bytes_written, data, eof = response_fields 
+      
+      # Set new Position since the EOF is not known
+      fp_position = int(eof)
+      
+    cached_blocks = cache.get_blocks(file_id, fp_position, eof_offset + bytes_to_write)
+    satisfied_blocks = 1
+    
+  else:
+    cached_blocks = cache.get_blocks(file_id, fp_position, bytes_to_write)
+    satisfied_blocks = 0
+  
+  for block in cached_blocks[satisfied_blocks:]:
     # Wait for the Respose
     response, _ = write_data_request.request_socket_fd.recvfrom(PACKET_LENGTH)
     response_fields = Request.parse_request(response)
@@ -192,9 +230,35 @@ def handle_write(selected_request):
       satisfied_requests.insert_satisfied_write_request(selected_request.sequence, False, -1, -1)
       selected_request.block_application_semaphore.release()
       return
-  
-  
+    
   satisfied_requests.insert_satisfied_write_request(selected_request.sequence, True, int(bytes_written.decode()), int(eof))
+  selected_request.block_application_semaphore.release()
+
+
+def handle_truncate(selected_request):
+  request_type, file_id, reincarnation_number, length = selected_request.fields
+  print(request_type, file_id, reincarnation_number, length)
+  
+  truncate_request = Request(request_type, file_id, reincarnation_number, length)
+  truncate_request.request_socket_fd.sendto(truncate_request.request, (SERVER_IP, SERVER_PORT))
+  
+  response, _ = truncate_request.request_socket_fd.recvfrom(PACKET_LENGTH)
+  response_fields = Request.parse_request(response)
+  
+  print(response_fields)
+  response_type, status, _ = response_fields
+  if status != b'ACK':
+    if DEBUG:
+      print('Truncate Error:', response_fields[-1])
+    
+    satisfied_requests.insert_satisfied_truncate_request(selected_request.sequence, False)
+    selected_request.block_application_semaphore.release()
+    return
+  
+  
+  t_modified = int(response_fields[-1])
+  cache.truncate_reset_blocks(file_id, t_modified, time.time(), length)
+  satisfied_requests.insert_satisfied_truncate_request(selected_request.sequence, True)
   selected_request.block_application_semaphore.release()
   
   
@@ -218,8 +282,8 @@ def requests_handler():
       handle_read(selected_request=selected_request)
     elif request_type == 'WRITE_REQ':
       handle_write(selected_request=selected_request)
-
-    
+    elif request_type == 'TRUNCATE_REQ':
+      handle_truncate(selected_request=selected_request)
     
 
 
@@ -261,10 +325,13 @@ def nfs_open(path, flags):
 
 def nfs_read(fd, length):
   selected_file = files_container.get_file_from_fd(fd)
-  position = selected_file.get_position(fd)
+  if not selected_file:
+    return '', -1
+  
+  position, eof_offset = selected_file.get_position(fd)
   
   # Check Read Permission and Position in File
-  if not selected_file.check_read_permission(fd) or position < 0:
+  if not selected_file.check_read_permission(fd) or position < 0 or eof_offset != None:
     return '', -1
   
   file_id = selected_file.file_id
@@ -282,8 +349,7 @@ def nfs_read(fd, length):
   data, length = satisfied_request.get_data(position, length)
   
   # The FP MUST NOT Surpass the File Size
-  files_container.update_position_by_fd(selected_file, fd, position + length)
-  # print(selected_file.get_position(fd))
+  files_container.update_position_by_fd(selected_file, fd, position, length)
   
   return data, length
   
@@ -291,6 +357,9 @@ def nfs_read(fd, length):
 
 def nfs_write(fd, buffer, length):
   selected_file = files_container.get_file_from_fd(fd)
+  if not selected_file:
+    return -1
+  
   
   # Check Write Permission
   if not selected_file.check_write_permission(fd):
@@ -299,10 +368,10 @@ def nfs_write(fd, buffer, length):
   
   file_id = selected_file.file_id
   reincarnation_number = selected_file.get_reincarnation_number(fd)
-  position = selected_file.get_position(fd)
+  position, eof_offset = selected_file.get_position(fd)
   block_size = cache.block_size
   
-  request = Request('WRITE_REQ', file_id, reincarnation_number, block_size, position, buffer, length)
+  request = Request('WRITE_REQ', file_id, reincarnation_number, block_size, position, eof_offset, buffer, length)
   requests_container.insert_request(request)
   
   
@@ -311,8 +380,9 @@ def nfs_write(fd, buffer, length):
     return -1
   if position < 0:
     position = satisfied_request.eof
-    
-  files_container.update_position_by_fd(selected_file, fd, position + satisfied_request.bytes_written)
+  
+  
+  files_container.update_position_by_fd(selected_file, fd, position, satisfied_request.bytes_written)
   
   
   return satisfied_request.bytes_written
@@ -320,20 +390,44 @@ def nfs_write(fd, buffer, length):
 def nfs_seek(fd, offset, whence):
   selected_file = files_container.get_file_from_fd(fd)
   
+  if not selected_file:
+    return -1
   
   if whence == SEEK_SET:
-    position = offset
+    current_position = 0
   elif whence == SEEK_CUR:
-    position = selected_file.get_position(fd) + offset
+    current_position, _ = selected_file.get_position(fd)
   elif whence == SEEK_END:
-    position = -1
+    current_position = EOF
   
-  files_container.update_position_by_fd(selected_file, fd, position)
+  files_container.update_position_by_fd(selected_file, fd, current_position, offset)
   
   
 def nfs_ftruncate(fd, length):
-  pass
+  selected_file = files_container.get_file_from_fd(fd)
+  
+  if not selected_file:
+    return -1
+  
+  # Check Write Permission
+  if not selected_file.check_truncate_permission(fd):
+    return -1
+
+  file_id = selected_file.file_id
+  reincarnation_number = selected_file.get_reincarnation_number(fd)
+  
+  request = Request('TRUNCATE_REQ', file_id, reincarnation_number, length)
+  requests_container.insert_request(request)
+
+  satisfied_request = satisfied_requests.get_satisfied_truncate_request(request.sequence)
+  if not satisfied_request: 
+    return -1
+  
+  return 0
 
 
 def nfs_close(fd):
-  pass 
+  selected_file = files_container.get_file_from_fd(fd)
+  return selected_file.pop_fd(fd)
+   
+  
