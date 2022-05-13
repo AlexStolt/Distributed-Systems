@@ -45,7 +45,7 @@ def create_file():
 
 def lookup_test():
     # Create
-    fd = nfs_open("files/test1.txt", O_CREAT | O_RDWR)
+    fd = nfs_open("files/test1.txt", O_CREAT | O_TRUNC | O_RDWR)
     print("File Descriptor:", fd)
     
 
@@ -67,7 +67,8 @@ if __name__ == '__main__':
         
     nfs_init("127.0.0.1", 8080, cache_blocks, cache_block_size, cache_fresh_t)
 
-    fd = nfs_open('files/command_line.txt', O_RDWR)
+    fd = nfs_open('files/command_line.txt', O_CREAT | O_RDWR | O_TRUNC)   
+    
     print(fd)
     while True:
         command = input('Command (Type -h or --help for help): ')

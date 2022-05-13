@@ -22,7 +22,7 @@
 #define PORT 8080
 #define SIZE 1024
 #define SEPERATOR "|"
-
+#define SUPPORTED_FlAGS 6
 #define DEBUG
 
 
@@ -88,7 +88,9 @@ int _unicast_socket_init();
 block_t *get_block_from_file(file_t *file, int start);
 int get_emtpy_block_position(file_t *file);
 int get_fd_by_id(file_container_t *file_container, int file_id);
-
+int *export_flags(int flags);
+bool contains_create(int flags);
+bool contains_truncate(int flags);
 void nfs_server_init();
 
 

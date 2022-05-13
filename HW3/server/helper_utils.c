@@ -10,6 +10,55 @@ void print_address(struct sockaddr *address){
 }
 
 
+bool contains_create(int flags){
+  printf("%d %d\n", (flags & O_CREAT), O_CREAT);
+  if((flags & O_CREAT) != O_CREAT){
+    return false;
+  }  
+  return true;
+}
+
+bool contains_truncate(int flags){
+  if((flags & O_TRUNC) != O_TRUNC){
+    return false;
+  }  
+  return true;
+}
+
+
+int *export_flags(int flags){
+  int *flags_arr;
+  
+  flags_arr = (int *) malloc(SUPPORTED_FlAGS * sizeof(int));
+  if(!flags_arr){
+    return NULL;
+  }
+
+  // Set array with -1
+  memset(flags_arr, -1, SUPPORTED_FlAGS * sizeof(int));
+
+  if((flags & O_RDONLY) == O_RDONLY)
+    flags_arr[0] = O_RDONLY;
+  
+  if((flags & O_WRONLY) == O_WRONLY)
+    flags_arr[1] = O_WRONLY;
+
+  if((flags & O_RDWR) == O_RDWR)
+    flags_arr[2] = O_RDWR;
+
+  if((flags & O_CREAT) == O_CREAT)
+    flags_arr[3] = O_CREAT;
+
+  if((flags & O_EXCL) == O_EXCL)
+    flags_arr[4] = O_EXCL;
+
+  if((flags & O_TRUNC) == O_TRUNC)
+    flags_arr[5] = O_TRUNC;
+
+  return flags_arr;
+}
+
+
 char *serialize_request(field_t *fields, int fields_length, int *serialized_request_length){
   char *serialized_request;
   char local_serialized_request[SIZE]; 

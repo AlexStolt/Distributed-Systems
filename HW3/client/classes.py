@@ -226,9 +226,9 @@ class SatisfiedRequests():
     return None
   
   
-  def insert_satisfied_write_request(self, request_sequence, status: bool, bytes_written: int, eof: int):
+  def insert_satisfied_write_request(self, request_sequence, status: bool, bytes_written: int, eof: int, current_offset: int):
     self.satisfied_write_requests_mutex.acquire()
-    self.satisfied_write_requests.append(self.SatisfiedWriteRequest(request_sequence, status, bytes_written, eof))
+    self.satisfied_write_requests.append(self.SatisfiedWriteRequest(request_sequence, status, bytes_written, eof, current_offset))
     self.satisfied_write_requests_mutex.release()
   
   
@@ -297,10 +297,11 @@ class SatisfiedRequests():
 
 
   class SatisfiedWriteRequest:
-    def __init__(self, request_sequence, status, bytes_written, eof):
+    def __init__(self, request_sequence, status, bytes_written, eof, current_offset):
       self.request_sequence = request_sequence
       self.status = status
       self.eof = eof
+      self.current_offset = current_offset
       self.bytes_written = bytes_written
 
 

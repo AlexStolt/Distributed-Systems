@@ -43,6 +43,7 @@ void lookup_handler(request_t *selected_request){
   char *file_path;
   int fd, flags, file_id;
   char file_id_string[SIZE];
+  int *current_flags, *requested_flags;
 
   // Response
   char *serialized_response;
@@ -74,7 +75,22 @@ void lookup_handler(request_t *selected_request){
       close(file_container->files[i]->file_fd);
       
       // Update Flags
-      file_container->files[i]->flags = file_container->files[i]->flags | flags;
+      current_flags   = export_flags(file_container->files[i]->flags);
+      requested_flags = export_flags(flags);
+      if(!current_flags || !requested_flags){
+        break;
+      }
+
+      file_container->files[i]->flags = 0;
+      for(int j = 0; j < SUPPORTED_FlAGS; j++){
+        if(current_flags[j] < 0){
+          continue;
+        }
+        else if(current_flags[j] != O_CREAT && current_flags[j] != O_EXCL && current_flags[j] != O_CREAT){
+          file_container->files[i]->flags = file_container->files[i]->flags | current_flags[j];
+        }
+      }
+
       file_container->files[i]->file_fd = open(file_path, file_container->files[i]->flags); 
       if(file_container->files[i]->file_fd < 0){
         // Response Status
@@ -98,7 +114,8 @@ void lookup_handler(request_t *selected_request){
 
   // Try to Open File
   if(file_id < 0){
-    fd = open(file_path, flags);
+    fd = open(file_path, flags, S_IRWXU);
+    printf("fd: %d\n", fd);
     if(fd >= 0){
       file = (file_t *) malloc(sizeof(file_t));
       if(!file){
@@ -341,8 +358,9 @@ void write_handler(request_t *selected_request){
   int eof;
   int empty_block_position;
   char t_modified_string[SIZE];
-  int is_eof;
   char *eof_flag;
+  int current_position;
+
 
   // Response
   char *serialized_response;
@@ -364,6 +382,8 @@ void write_handler(request_t *selected_request){
 
   bof = -1;
   eof = -1;
+  current_position = 0;
+
 
   if(reincarnation_number != current_reincarnation_number){
     strcpy(response_fields[1].field, "NACK");
@@ -514,8 +534,15 @@ void write_handler(request_t *selected_request){
             sprintf(response_fields[5].field, "%d", eof);
             response_fields[5].length = strlen(response_fields[5].field);
 
+            current_position = lseek(file_container->files[file_index]->file_fd, 0, SEEK_CUR);
+            printf("%d\n", current_position);
+
+            // Current Offset in File
+            sprintf(response_fields[6].field, "%d", current_position);
+            response_fields[6].length = strlen(response_fields[6].field);
+
             // Length of Fields
-            fields_length = 6;
+            fields_length = 7;
 
             // Serialize Response from Fields
             serialized_response = serialize_request(response_fields, fields_length, &response_length);

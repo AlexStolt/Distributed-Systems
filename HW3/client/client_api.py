@@ -189,8 +189,8 @@ def handle_write(selected_request):
     response, _ = write_data_request.request_socket_fd.recvfrom(PACKET_LENGTH)
     response_fields = Request.parse_request(response)
     
-    if len(response_fields) == 6:  
-      response_type, status, t_modified, bytes_written, data, eof = response_fields 
+    if len(response_fields) == 7:  
+      response_type, status, t_modified, bytes_written, data, eof, current_offset = response_fields 
       
       # Set new Position since the EOF is not known
       fp_position = int(eof)
@@ -207,8 +207,8 @@ def handle_write(selected_request):
     response, _ = write_data_request.request_socket_fd.recvfrom(PACKET_LENGTH)
     response_fields = Request.parse_request(response)
     
-    if len(response_fields) == 6:  
-      response_type, status, t_modified, bytes_written, data, eof = response_fields 
+    if len(response_fields) == 7:  
+      response_type, status, t_modified, bytes_written, data, eof, current_offset = response_fields 
       
       block.valid_block_size = len(data)
       block.t_fresh = time.time() + cache.fresh_t
@@ -231,7 +231,7 @@ def handle_write(selected_request):
       selected_request.block_application_semaphore.release()
       return
     
-  satisfied_requests.insert_satisfied_write_request(selected_request.sequence, True, int(bytes_written.decode()), int(eof))
+  satisfied_requests.insert_satisfied_write_request(selected_request.sequence, True, int(bytes_written.decode()), int(eof), int(current_offset))
   selected_request.block_application_semaphore.release()
 
 
@@ -378,11 +378,8 @@ def nfs_write(fd, buffer, length):
   satisfied_request = satisfied_requests.get_satisfied_write_request(request.sequence)
   if not satisfied_request.status:
     return -1
-  if position < 0:
-    position = satisfied_request.eof
   
-  
-  files_container.update_position_by_fd(selected_file, fd, position, satisfied_request.bytes_written)
+  files_container.update_position_by_fd(selected_file, fd, 0, satisfied_request.current_offset)
   
   
   return satisfied_request.bytes_written
