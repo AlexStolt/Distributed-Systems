@@ -81,17 +81,17 @@ void lookup_handler(request_t *selected_request){
         break;
       }
 
-      file_container->files[i]->flags = 0;
+      file_container->files[i]->flags = flags;
       for(int j = 0; j < SUPPORTED_FlAGS; j++){
         if(current_flags[j] < 0){
           continue;
         }
-        else if(current_flags[j] != O_CREAT && current_flags[j] != O_EXCL && current_flags[j] != O_CREAT){
+        else if(current_flags[j] != O_CREAT && current_flags[j] != O_EXCL && current_flags[j] != O_TRUNC){
           file_container->files[i]->flags = file_container->files[i]->flags | current_flags[j];
         }
       }
-
-      file_container->files[i]->file_fd = open(file_path, file_container->files[i]->flags); 
+      printf("*** %d\n", file_container->files[i]->flags);
+      file_container->files[i]->file_fd = open(file_path, file_container->files[i]->flags, S_IRWXU); 
       if(file_container->files[i]->file_fd < 0){
         // Response Status
         strcpy(response_fields[1].field, "NACK");
