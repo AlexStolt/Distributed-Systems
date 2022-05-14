@@ -225,9 +225,10 @@ def handle_write(selected_request):
         selected_block.update_block(block.valid_block_size, block.t_fresh, block.t_modified, block.data)
     else:
       if DEBUG:
-        print('Error:', response_fields)
+          _, _, error_message = response_fields
+          print("Error in Write:", error_message)
       
-      satisfied_requests.insert_satisfied_write_request(selected_request.sequence, False, -1, -1)
+      satisfied_requests.insert_satisfied_write_request(selected_request.sequence, False, -1, -1, -1)
       selected_request.block_application_semaphore.release()
       return
     
@@ -407,8 +408,8 @@ def nfs_ftruncate(fd, length):
     return -1
   
   # Check Write Permission
-  if not selected_file.check_truncate_permission(fd):
-    return -1
+  # if not selected_file.check_truncate_permission(fd):
+  #   return -1
 
   file_id = selected_file.file_id
   reincarnation_number = selected_file.get_reincarnation_number(fd)
@@ -418,6 +419,8 @@ def nfs_ftruncate(fd, length):
 
   satisfied_request = satisfied_requests.get_satisfied_truncate_request(request.sequence)
   if not satisfied_request: 
+    return -1
+  if not satisfied_request.status:
     return -1
   
   return 0

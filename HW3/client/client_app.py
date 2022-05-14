@@ -67,7 +67,7 @@ if __name__ == '__main__':
         
     nfs_init("127.0.0.1", 8080, cache_blocks, cache_block_size, cache_fresh_t)
 
-    fd = nfs_open('files/command_line.txt', O_CREAT | O_RDWR | O_TRUNC)   
+    fd = nfs_open('files/command_line.txt', O_RDWR)   
     
     print(fd)
     while True:

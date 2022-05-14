@@ -90,7 +90,7 @@ void lookup_handler(request_t *selected_request){
           file_container->files[i]->flags = file_container->files[i]->flags | current_flags[j];
         }
       }
-      printf("*** %d\n", file_container->files[i]->flags);
+      
       file_container->files[i]->file_fd = open(file_path, file_container->files[i]->flags, S_IRWXU); 
       if(file_container->files[i]->file_fd < 0){
         // Response Status
@@ -115,7 +115,6 @@ void lookup_handler(request_t *selected_request){
   // Try to Open File
   if(file_id < 0){
     fd = open(file_path, flags, S_IRWXU);
-    printf("fd: %d\n", fd);
     if(fd >= 0){
       file = (file_t *) malloc(sizeof(file_t));
       if(!file){
@@ -205,8 +204,6 @@ void read_handler(request_t *selected_request){
   block_size            = atoi(selected_request->fields[4].field);
   t_modified            = atoi(selected_request->fields[5].field);
 
-  printf("%d %d %d %d %d\n", file_id, reincarnation_number, block_start, block_size, t_modified);
-  fflush(stdout);
   
   // Response Type
   strcpy(response_fields[0].field, "READ_RES");
@@ -383,7 +380,10 @@ void write_handler(request_t *selected_request){
   bof = -1;
   eof = -1;
   current_position = 0;
-
+  
+  // Response Type
+  strcpy(response_fields[0].field, "WRITE_RES");
+  response_fields[0].length = strlen(response_fields[0].field);
 
   if(reincarnation_number != current_reincarnation_number){
     strcpy(response_fields[1].field, "NACK");
@@ -394,6 +394,12 @@ void write_handler(request_t *selected_request){
 
     // Total Fields
     fields_length = 3;
+
+     // Serialize Response from Fields
+    serialized_response = serialize_request(response_fields, fields_length, &response_length);
+
+    // Send Response
+    sendto(unicast_socket_fd, serialized_response, response_length * sizeof(char), 0, &selected_request->source, selected_request->address_length);
   } 
   else {
     file_index = get_fd_by_id(file_container, file_id);
@@ -459,7 +465,7 @@ void write_handler(request_t *selected_request){
           while (end % block_size){
             end++;
           }
-          printf("%d %d\n", start, end);
+          
           // Update Overlaping Blocks
           for(int j = 0; j < SIZE; j++){
             if(!file_container->files[file_index]->blocks[j]){
@@ -477,10 +483,6 @@ void write_handler(request_t *selected_request){
             // Blocks Overlap
             file_container->files[file_index]->blocks[j]->t_modified = t_modified;
           }
-
-          // Response Type
-          strcpy(response_fields[0].field, "WRITE_RES");
-          response_fields[0].length = strlen(response_fields[0].field);
 
           // Response Status
           strcpy(response_fields[1].field, "ACK");
@@ -535,7 +537,6 @@ void write_handler(request_t *selected_request){
             response_fields[5].length = strlen(response_fields[5].field);
 
             current_position = lseek(file_container->files[file_index]->file_fd, 0, SEEK_CUR);
-            printf("%d\n", current_position);
 
             // Current Offset in File
             sprintf(response_fields[6].field, "%d", current_position);
@@ -633,13 +634,12 @@ void truncate_handler(request_t *selected_request){
           if(!file_container->files[file_index]->blocks[i]){
             continue;
           }
+          
           // Current Length of File is Larger than the End of Checking Block
           if(length >= file_container->files[file_index]->blocks[i]->end){
-            printf("Skip %d %d\n", file_container->files[file_index]->blocks[i]->start, file_container->files[file_index]->blocks[i]->end);
             continue;
           }
           file_container->files[file_index]->blocks[i]->t_modified = t_modified;
-          printf("Truncate %d %d\n", file_container->files[file_index]->blocks[i]->start, file_container->files[file_index]->blocks[i]->end);
         }
       }
     }
