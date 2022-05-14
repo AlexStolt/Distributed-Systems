@@ -6,12 +6,10 @@ void print_address(struct sockaddr *address){
 
   address_in = (struct sockaddr_in *) address;
   inet_ntop(AF_INET, &(address_in->sin_addr), ip, INET_ADDRSTRLEN);
-  printf("%s:%d\n", ip, ntohs(address_in->sin_port));
 }
 
 
 bool contains_create(int flags){
-  printf("%d %d\n", (flags & O_CREAT), O_CREAT);
   if((flags & O_CREAT) != O_CREAT){
     return false;
   }  
@@ -112,7 +110,6 @@ block_t *get_block_from_file(file_t *file, int start){
   i = 0;
   while(file->blocks[i] != NULL){
     if(file->blocks[i]->start != start){
-      printf("%d - %d\n", file->blocks[i]->start, start);
       i++;
       
       continue;

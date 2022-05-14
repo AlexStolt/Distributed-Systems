@@ -263,7 +263,6 @@ def handle_truncate(selected_request):
   selected_request.block_application_semaphore.release()
   
   
-  
 # Thread
 def requests_handler():
   while True:
