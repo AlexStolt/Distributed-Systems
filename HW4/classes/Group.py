@@ -8,7 +8,6 @@ class Group:
     self.group_id = group_id
     self.processes = []
     self.group_addresses = [] # A list containing all process sockets and info
-    self.group_environments = []
     self.migration_mutex = threading.Lock()
 
   @property
@@ -21,8 +20,6 @@ class Group:
   def process_count(self):
     return len(self.processes)  
 
-  def insert_environment(self, environment_id):
-    self.group_environments.append(environment_id)
 
   def find_process(self, process_id: int):
     for process in self.processes:
@@ -36,7 +33,7 @@ class Group:
     self.group_addresses = self.group_addresses + group_addresses
 
 
-  def insert_process(self, process):
+  def insert_process(self, process_environment_id, process):
     # Remove duplicates if any
     for process_address in self.group_addresses[:]:
       if process_address['process_id'] != process.process_id:
@@ -47,7 +44,8 @@ class Group:
 
     self.group_addresses.append({
       'process_id': process.process_id,
-      'process_address': tuple(process.udp_listener_socket.getsockname())
+      'process_address': tuple(process.udp_listener_socket.getsockname()),
+      'process_environment_id': process_environment_id 
     })
 
     self.processes.append(process)

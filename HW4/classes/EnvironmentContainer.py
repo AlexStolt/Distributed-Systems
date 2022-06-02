@@ -1,20 +1,32 @@
+import math
 from multiprocessing import connection
+from os import R_OK
 import socket
 import threading
+import struct
+import select
 import time
-from traceback import print_tb
+
+from pytz import common_timezones
 from classes.Group import Group
 
-from classes.Process import BLOCKED, MIGRATED, PACKET_LENGTH, Process
+from classes.Process import BLOCKED, KILLED, MIGRATED, PACKET_LENGTH, Process
 import pickle
 
+LOAD_BALANCE = True
+
 N = 4
+TRIES = 4
+TIMEOUT = 0.2
+MULTICAST_WAITING_PERIOD = 1
+PACKET_LENGTH = 1024
+MULTICAST_GROUP = '224.1.1.1'
+MULTICAST_PORT = 8000
 
 class EnvironmentContainer:
   def __init__(self):
-    self.tcp_listener_fd = self.__socket_init() 
+    self.tcp_listener_fd = self.__tcp_socket_init() 
     print(self.tcp_listener_fd.getsockname())
-    
     self.groups = []
 
     self.scheduler = threading.Thread(target=self.__scheduler)
@@ -23,16 +35,31 @@ class EnvironmentContainer:
     self.tcp_listener = threading.Thread(target=self.__tcp_listener_thread)
     self.tcp_listener.start()
 
+    if LOAD_BALANCE:
+      self.multicast_fd = self.__multicast_socket_init()
+      self.unicast_fd = self.__unicast_socket_init()
+      self.multicast_listener = threading.Thread(target=self.__multicast_listener_thread)
+      self.multicast_listener.start()
+      self.load_balance()
 
   @property
   def group_count(self):
     return len(self.groups)
+
 
   @property
   def socket_info(self):
     delimiter = ','
     return delimiter.join([str(value) for value in self.tcp_listener_fd.getsockname()])
     
+  @property
+  def load(self):
+    load_counter = 0
+    for group in self.groups:
+      for process in group.processes:
+        load_counter = load_counter + 1
+    
+    return load_counter
 
 
   # Read each line of the file ignoring the empty lines
@@ -40,35 +67,180 @@ class EnvironmentContainer:
   def read_file(file_path):
     with open(file_path) as file:
       lines = file.readlines()
-    
+
     # Delete '\n' from end of string
     for i in range(len(lines)):
+      lines[i] = lines[i].strip()
+      lines[i] = " ".join(lines[i].split())
       lines[i] = lines[i].replace('\n', '')
     
     # Delete empty lines
     return list(filter(('').__ne__, lines))
   
 
-
-  def find_group(self, group_id: int):
+  def find_group(self, group_id: int, environment_id: str):
     for group in self.groups:
-      if group.group_id != group_id:
+      if group.group_id != group_id or group.environment_id != environment_id:
         continue
       return group
     
     return None
 
-  
-  def group_list(self, group_id: int):
-    group = self.find_group(group_id)
-
-    print(f"GROUP[{group.group_id}]:")
+  # Method used when the "list" command is entered to display all
+  # processes running in group
+  def list_group(self, group_id: int, environment_id: str):
+    group = self.find_group(group_id, environment_id)
+    if not group:
+      return False
+    
+    print(f"\033[92mGROUP[{group.group_id}]:", end=' ')
     for process in group.group_addresses:
-      print(f"Process[{process['process_id']}]")
+      print(f"Process[{process['process_environment_id']}][{process['process_id']}]", end=' ')
+    print('\033[00m')
 
 
-  def migrate(self, group_id: int, process_id: int, dst_ip: str, dst_port: int):
-    group = self.find_group(group_id=group_id)
+  # Kill a process that runs on the local environment
+  def kill_local_process(self, group, process):
+    process.flags = KILLED
+    process.udp_listener.join()
+    print('Process Killed')
+    
+
+    group.processes.remove(process)
+    if not len(group.processes):
+      print('Group Removed')
+      self.groups.remove(group)
+
+
+  # Remove process from group addresses since the process is no longer active
+  def kill_process_address_communication(self, group, process_id):
+    for process_address in group.group_addresses[:]:
+      if process_address['process_id'] != process_id:
+        continue
+      
+      group.group_addresses.remove(process_address)
+
+
+  # Method used when the "kill" command is entered to
+  # kill a certain process from any environment
+  def kill_process(self, environment_id: str, group_id: int, process_id: int):
+    # Find group
+    group = self.find_group(group_id, environment_id)
+    if not group:
+      return False
+    
+    # Find process to check is process is running on local environment
+    process = group.find_process(process_id)
+    
+    group.migration_mutex.acquire()
+
+    # Process runs on local environment
+    if process:
+      self.kill_local_process(group, process)
+    
+    # Update all remote environments
+    for process_address in group.group_addresses:
+      if process_address['process_environment_id'] != self.socket_info:
+        address = process_address['process_environment_id'].split(',')
+        dst_ip = address[0]
+        dst_port = int(address[1])
+
+        serialized_data = {
+          "request_type": "kill_process_request",
+          "environment_id": environment_id,
+          "group_id": group_id,
+          "process_id": process_id
+        }
+        serialized_data = pickle.dumps(serialized_data)
+
+        sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sender_socket_fd.connect((dst_ip, dst_port))
+        sender_socket_fd.send(serialized_data)
+    
+
+        # Receive an acknowledgement
+        sender_socket_fd.recv(PACKET_LENGTH)
+      
+
+    # Remove process communication address since process is removed
+    self.kill_process_address_communication(group, process_id)
+      
+    group.migration_mutex.release()
+  
+  
+  def kill_group(self, environment_id: str, group_id: int):
+    # Find group
+    group = self.find_group(group_id, environment_id)
+    if not group:
+      return False
+    
+    group.migration_mutex.acquire() # Maybe here???
+
+    # Kill processes running on local environment
+    for process in group.processes[:]:
+      self.kill_local_process(group, process)
+      
+    print(group.group_addresses)
+    for process_address in group.group_addresses:
+      # Processes that are located on different environments
+      if process_address['process_environment_id'] != self.socket_info:
+        address = process_address['process_environment_id'].split(',')
+        dst_ip = address[0]
+        dst_port = int(address[1])
+
+        serialized_data = {
+          "request_type": "kill_group_request",
+          "environment_id": environment_id,
+          "group_id": group_id
+        }
+        serialized_data = pickle.dumps(serialized_data)
+
+        sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sender_socket_fd.connect((dst_ip, dst_port))
+        sender_socket_fd.send(serialized_data)
+    
+
+        # Receive an acknowledgement
+        sender_socket_fd.recv(PACKET_LENGTH)
+
+      
+
+    # Get processes from the environments that have the most load
+    received_loads, _ = self.load_balance()
+    print(received_loads)
+    
+    
+    
+    # Request other environments to load balance
+    for environment in received_loads:
+      # Processes that are located on different environments
+      print(environment)
+      if environment['environment_id'] != self.socket_info:
+        address = environment['environment_id'].split(',')
+        dst_ip = address[0]
+        dst_port = int(address[1])
+
+        serialized_data = {
+          "request_type": "kill_migrate_request"
+        }
+        serialized_data = pickle.dumps(serialized_data)
+
+        sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sender_socket_fd.connect((dst_ip, dst_port))
+        sender_socket_fd.send(serialized_data)
+    
+
+        # Receive an acknowledgement
+        ackn = sender_socket_fd.recv(PACKET_LENGTH)
+        print(ackn)
+    
+    group.migration_mutex.release()
+
+    
+
+
+  def migrate(self, environment_id: str, group_id: int, process_id: int, dst_ip: str, dst_port: int):
+    group = self.find_group(group_id=group_id, environment_id=environment_id)
     if not group:
       return False
     
@@ -76,35 +248,32 @@ class EnvironmentContainer:
     if not process:
       return False
 
-    
 
     group.migration_mutex.acquire()
-    print('MIGRATING NOW')
 
     # Instantly mark process as migrated
-    process.flags_mutex.acquire()
     process.flags = MIGRATED
-    process.flags_mutex.release()
+
     
-    # sent_group_addresses = group.group_addresses[:]
+    # Wait for threads to terminate and remove process and group
+    process.udp_listener.join()
+    print("UDP Listener Thread Returned")
+
+    # Set None since data is not stable yet
     for i in range(len(group.group_addresses)):
       if group.group_addresses[i]['process_id'] != process.process_id:
         continue
 
       group.group_addresses[i]['process_address'] = None
-      # sent_group_addresses.remove(group.group_addresses[i])
+      group.group_addresses[i]['process_environment_id'] = None
       break
     
-    # Group will be removed thus remove self from list
-    if len(group.processes) == 1:
-      group.group_environments.remove(self.socket_info)
     
     # Serialize data
     serialized_data = {
       "request_type": 'migrate_request',
       "environment_id": group.environment_id,
       "group_id": group.group_id,
-      "group_environments": group.group_environments,
       "group_addresses": group.group_addresses,
       "file_path": process.file_path,
       "file_content": process.file_content,
@@ -114,7 +283,7 @@ class EnvironmentContainer:
       "argv": process.argv,
       "received_messages": process.received_messages
     }
-    # print('@@@', process.received_messages)
+    
     serialized_data = pickle.dumps(serialized_data)
 
     # Send process to client
@@ -125,7 +294,7 @@ class EnvironmentContainer:
     # Receive an acknowledgement
     sender_socket_fd.recv(PACKET_LENGTH)
     
-    # Remove process and group
+    
     group.processes.remove(process)
     if not len(group.processes):
       self.groups.remove(group)  
@@ -133,7 +302,156 @@ class EnvironmentContainer:
     group.migration_mutex.release()
     
 
+  def load_balance(self):
+    # Group just joined thus send to all environments to learn about their loads
+    serialized_data = {
+      'request_type': 'load_discovery_request',
+      'environment_id': self.socket_info
+    }
+    serialized_data = pickle.dumps(serialized_data)
+    self.unicast_fd.sendto(serialized_data, (MULTICAST_GROUP, MULTICAST_PORT))
+    
+    
 
+   
+    received_loads = []
+    end_period = time.time() + MULTICAST_WAITING_PERIOD
+    while time.time() < end_period:
+      for _ in range(TRIES):
+        readable, _, _ = select.select([self.unicast_fd], [], [], TIMEOUT)
+        if self.unicast_fd not in readable:
+          continue
+        
+        deserialized_data, _ = self.unicast_fd.recvfrom(PACKET_LENGTH)
+        deserialized_data = pickle.loads(deserialized_data)
+
+        received_loads.append({
+          'environment_id': deserialized_data['environment_id'],
+          'environment_load': deserialized_data['environment_load']
+        })
+
+
+    if not received_loads:
+      return None, None
+    
+
+    # Compute loaded environments that need to send some of their load    
+    most_loaded_environments = self.get_most_loaded_environments(received_loads)
+    if not most_loaded_environments:
+      return received_loads, None
+
+    print('Most Loaded Environments:', most_loaded_environments)
+    # Send to TCP sockets
+    for loaded_environment in most_loaded_environments:
+      serialized_data = {
+        'request_type': 'load_reduction_request',
+        'environment_id': self.socket_info,
+        'expected_processes': loaded_environment['expected_processes']
+      }
+      serialized_data = pickle.dumps(serialized_data)
+
+      address = loaded_environment['environment_id'].split(',')
+      dst_ip = address[0]
+      dst_port = int(address[1])
+
+      # Send process to client
+      sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      sender_socket_fd.connect((dst_ip, dst_port))
+      sender_socket_fd.send(serialized_data)
+      
+
+      # Receive an acknowledgement
+      sender_socket_fd.recv(PACKET_LENGTH)
+    
+    return received_loads, most_loaded_environments
+      
+
+  # Function that computes which environments 
+  # must migrate to this environment
+  def get_least_loaded_environments(self, received_loads):
+    average_load = self.load
+    # Calculate the average load including self
+    for load in received_loads:
+      average_load = average_load + load['environment_load']
+    
+    average_load = average_load / (len(received_loads) + 1)
+
+    least_loaded_environments = []
+    for load in received_loads:
+      if load['environment_load'] < average_load:
+        expected_processes = average_load - load['environment_load'] 
+        if expected_processes < 1:
+          expected_processes = int(expected_processes) 
+        else:
+          expected_processes = int(math.ceil(expected_processes))
+
+        least_loaded_environments.append({
+          'environment_id': load['environment_id'],
+          'expected_processes': expected_processes
+        })
+    
+    return least_loaded_environments
+
+
+  # Function that computes which environments 
+  # must migrate to this environment
+  def get_most_loaded_environments(self, received_loads):
+    average_load = self.load
+    current_load = self.load
+    # Calculate the average load including self
+    for load in received_loads:
+      average_load = average_load + load['environment_load']
+    
+    average_load = average_load / (len(received_loads) + 1)
+    upper_limit = int(math.ceil(average_load))
+    lower_limit = int(average_load)
+    
+    most_loaded_environments = []
+    for load in received_loads:
+      print('*****', average_load, load['environment_load'], upper_limit)
+      if current_load < lower_limit:
+        if load['environment_load'] > upper_limit:
+          expected_processes = load['environment_load'] - average_load
+          if expected_processes < 1:
+            expected_processes = int(math.ceil(expected_processes))
+          else:
+            expected_processes = int(expected_processes)
+
+          most_loaded_environments.append({
+            'environment_id': load['environment_id'],
+            'expected_processes': expected_processes
+          })
+          current_load = current_load + expected_processes
+    
+    return most_loaded_environments
+
+
+  def __multicast_listener_thread(self):
+    
+    while True:
+      for _ in range(TRIES):
+        readable, _, _ = select.select([self.multicast_fd], [], [], TIMEOUT)
+        
+        if self.multicast_fd in readable:
+          deserialized_data, address = self.multicast_fd.recvfrom(PACKET_LENGTH)
+          deserialized_data = pickle.loads(deserialized_data)
+          print(deserialized_data)  
+          if deserialized_data['request_type'] == 'load_discovery_request':
+            # Ignore messages from self
+            if deserialized_data['environment_id'] == self.socket_info:
+              continue
+
+            # Get current environment's load 
+            serialized_data = {
+              'request_type': 'load_discovery_response',
+              'environment_id': self.socket_info,
+              'environment_load': self.load
+            }
+            serialized_data = pickle.dumps(serialized_data)
+
+            self.multicast_fd.sendto(serialized_data, address)
+          
+           
   def __tcp_listener_thread(self):
     while True:
       connection, address = self.tcp_listener_fd.accept()
@@ -144,102 +462,196 @@ class EnvironmentContainer:
         
         deserialized_data = pickle.loads(data)
         
-        # print('+++', deserialized_data)
-        if deserialized_data['request_type'] != 'migrate_request':
-          print(deserialized_data)
-          received_group = self.find_group(deserialized_data['group_id'])
-          if not received_group:
+        # Migration response
+        if deserialized_data['request_type'] == 'migrate_response':
+          group = self.find_group(deserialized_data['group_id'], deserialized_data['environment_id'])
+          if not group:
             connection.send('ACK'.encode())
             continue 
 
-          # received_group.migration_mutex.acquire()
-          for group_iterator in received_group.group_addresses:
-            if group_iterator['process_id'] != deserialized_data['process_id']:
+          for process_address in group.group_addresses:
+            if process_address['process_id'] != deserialized_data['process_id']:
               continue
-            group_iterator['process_address'] = deserialized_data['process_address']
-            # print('&&&&', group_iterator)
+            process_address['process_address'] = deserialized_data['process_address']
+            process_address['process_environment_id'] = deserialized_data['process_environment_id']
+            
           
-          received_group.group_environments = deserialized_data['migrated_environments']
-          print(received_group.group_environments)
           connection.send('ACK'.encode())
-          # print(received_group.group_environments)
-          # received_group.migration_mutex.release()
+          
           continue
+        
+        # Migration request
+        elif deserialized_data['request_type'] == 'migrate_request':
+          # Check if group already exists and if not create a new one
+          group_exists = False
+          for group in self.groups:
+            if group.group_id != deserialized_data['group_id'] or group.environment_id != deserialized_data['environment_id']:
+              continue
+            
+            group_exists = True
+            process = Process(
+              deserialized_data['file_path'], deserialized_data['file_content'], group, deserialized_data['process_id'], 
+              deserialized_data['ip'], deserialized_data['data'], deserialized_data['received_messages'], deserialized_data['argv'])
+            
+            group.insert_process(self.socket_info, process)
+            break
+          
+          print('***', group_exists)
+          
+          # Group does not exist thus create a group
+          if not group_exists:
+            # Also inserts self environment 
+            group = Group(deserialized_data['environment_id'], deserialized_data['group_id'])
+
+            # Create a process
+            process = Process(
+              deserialized_data['file_path'], deserialized_data['file_content'], 
+              group, deserialized_data['process_id'], deserialized_data['ip'], 
+              deserialized_data['data'], deserialized_data['received_messages'], 
+              deserialized_data['argv'])
+
+            
+            group.insert_group_addresses(deserialized_data['group_addresses'])
+            group.insert_process(self.socket_info, process)
+            
+            self.insert_group(group, False)
 
 
-        # Check if group already exists and if not create a new one
-        group_exists = False
-        for group in self.groups:
-          if group.group_id != deserialized_data['group_id'] or group.environment_id != deserialized_data['environment_id']:
+          connection.send('ACK'.encode())
+          
+          # Reply to sender with the new socket that the process has
+          serialized_data = {
+            "request_type": 'migrate_response',
+            "environment_id": group.environment_id,
+            "group_id": group.group_id,
+            "process_id": process.process_id,
+            "process_address": process.udp_listener_socket.getsockname(),
+            "process_environment_id": self.socket_info
+          }
+          
+          serialized_data = pickle.dumps(serialized_data)
+
+          # Send to all TCP environments
+          for process_address in group.group_addresses:
+            if process_address['process_environment_id'] != self.socket_info:
+              address = process_address['process_environment_id'].split(',')
+              dst_ip = address[0]
+              dst_port = int(address[1])
+
+
+              # Send process to client
+              sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              sender_socket_fd.connect((dst_ip, dst_port))
+              sender_socket_fd.send(serialized_data)
+              
+              # Receive new socket address
+              acknowledgement = sender_socket_fd.recv(PACKET_LENGTH)
+        
+        elif deserialized_data['request_type'] == 'kill_process_request':
+          group = self.find_group(deserialized_data['group_id'],  deserialized_data['environment_id'])
+          if group:  
+            process = group.find_process(deserialized_data['process_id'])
+            if process:
+              self.kill_local_process(group, process)
+            
+            self.kill_process_address_communication(group, deserialized_data['process_id'])
+
+          connection.send('ACK'.encode())
+        elif deserialized_data['request_type'] == 'kill_group_request':
+          group = self.find_group(deserialized_data['group_id'], deserialized_data['environment_id'])
+          if group:  
+            for process in group.processes[:]:
+              self.kill_local_process(group, process)
+          
+          connection.send('ACK'.encode())
+        elif deserialized_data['request_type'] == 'load_reduction_request':
+          address = deserialized_data['environment_id'].split(',')
+          dst_ip = address[0]
+          dst_port = int(address[1])
+
+          print(deserialized_data)
+
+          for _ in range(deserialized_data['expected_processes']):
+            environment_id, group_id, process_id = self.lra_process()
+            if not environment_id or group_id < 0 or process_id < 0:
+              break
+            
+            print(environment_id, group_id, process_id, dst_ip, dst_port)
+            self.migrate(environment_id, group_id, process_id, dst_ip, dst_port)
+
+          connection.send('ACK'.encode())
+
+        elif deserialized_data['request_type'] == 'kill_migrate_request':
+          print('&&&&&&&&&&&&& migrate kill')
+
+
+          serialized_data = {
+            'request_type': 'load_discovery_request',
+            'environment_id': self.socket_info
+          }
+          serialized_data = pickle.dumps(serialized_data)
+          self.unicast_fd.sendto(serialized_data, (MULTICAST_GROUP, MULTICAST_PORT))
+          
+          received_loads = []
+          end_period = time.time() + MULTICAST_WAITING_PERIOD
+          while time.time() < end_period:
+            for _ in range(TRIES):
+              readable, _, _ = select.select([self.unicast_fd], [], [], TIMEOUT)
+              if self.unicast_fd not in readable:
+                continue
+              
+              deserialized_data, _ = self.unicast_fd.recvfrom(PACKET_LENGTH)
+              deserialized_data = pickle.loads(deserialized_data)
+
+              received_loads.append({
+                'environment_id': deserialized_data['environment_id'],
+                'environment_load': deserialized_data['environment_load']
+              })
+
+          if not received_loads:
+            connection.send('ACK'.encode())
+            continue
+
+          
+          # Compute loaded environments that need to receive some of current load    
+          least_loaded_environments = self.get_least_loaded_environments(received_loads)
+          if not least_loaded_environments:
+            connection.send('ACK'.encode())
             continue
           
-          group_exists = True
-          process = Process(
-            deserialized_data['file_path'], deserialized_data['file_content'], group, deserialized_data['process_id'], 
-            deserialized_data['ip'], deserialized_data['data'], deserialized_data['received_messages'], deserialized_data['argv'])
-          
-          group.group_environments = deserialized_data['group_environments']
-          group.insert_process(process)
-          break
 
-        
-        # Group does not exist thus create a group
-        if not group_exists:
-          # Also inserts self environment 
-          group = Group(deserialized_data['environment_id'], deserialized_data['group_id'])
-          # Insert environments remaining environments
-          for environment in deserialized_data['group_environments']:
-            if environment not in group.group_environments:
-              group.insert_environment(environment)
-          
-          # Insert new environment (self)
-          group.insert_environment(self.socket_info)
 
-          # Create a process
-          process = Process(
-            deserialized_data['file_path'], deserialized_data['file_content'], group, deserialized_data['process_id'], 
-            deserialized_data['ip'], deserialized_data['data'], deserialized_data['received_messages'], deserialized_data['argv'])
 
-          
-          group.insert_group_addresses(deserialized_data['group_addresses'])
-          group.insert_process(process)
-          
-          self.insert_group(group)
-
-        connection.send('ACK'.encode())
-        
-        # Reply to sender with the new socket that the process has
-        serialized_data = {
-          "request_type": 'migrate_response',
-          "environment_id": group.environment_id,
-          "group_id": group.group_id,
-          "migrated_environments": group.group_environments,
-          "process_id": process.process_id,
-          "process_address": process.udp_listener_socket.getsockname()
-        }
-        # print('---', serialized_data)
-        serialized_data = pickle.dumps(serialized_data)
-
-        # Send to all TCP environments
-        for environment in group.group_environments:
-          # print(environment, self.socket_info)
-          if environment != self.socket_info:
-            address = environment.split(',')
+          # ????????????????????????
+          print('========', least_loaded_environments)
+          for least_loaded_environment in least_loaded_environments:
+            address = least_loaded_environment['environment_id'].split(',')
             dst_ip = address[0]
             dst_port = int(address[1])
 
 
-            # Send process to client
-            sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sender_socket_fd.connect((dst_ip, dst_port))
-            sender_socket_fd.send(serialized_data)
-            
-            # Receive new socket address
-            acknowledgement = sender_socket_fd.recv(PACKET_LENGTH)
-            # print(acknowledgement)
-      # group.migration_mutex.release()
-      # connection.send(serialized_data)
-        
+            for _ in range(least_loaded_environment['expected_processes']):
+              environment_id, group_id, process_id = self.lra_process()
+              if not environment_id or group_id < 0 or process_id < 0:
+                break
+              
+              self.migrate(environment_id, group_id, process_id, dst_ip, dst_port)
+
+            connection.send('ACK'.encode())
+
+          
+          # self.load_balance()
+          
+
+
+
+  # Function that returns the least recently appended process_id
+  def lra_process(self):
+    try:
+      return self.groups[0].environment_id, self.groups[0].group_id, self.groups[0].processes[0].process_id
+    except:
+      return None, -1, -1
+
 
   def __scheduler(self):
     while True:
@@ -270,16 +682,87 @@ class EnvironmentContainer:
               print(f'Group[{group.group_id}] removed since all processes finished')
               self.groups.remove(self.groups[i])
 
-  def insert_group(self, group):
-    if not group.is_empty:
-      self.groups.append(group)
 
-  
-  
+  def insert_group(self, group, load_balancing: bool):
+    if group.is_empty:
+      return
+    
+    self.groups.append(group)
+    
+    # Load balancing is disabled
+    if not LOAD_BALANCE or not load_balancing:
+      return
 
-  def __socket_init(self, address: str = '', port: int = 0):
-    fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    fd.bind((address, port))
-    fd.listen()
+    # Group just joined thus send to all environments to learn about their loads
+    serialized_data = {
+      'request_type': 'load_discovery_request',
+      'environment_id': self.socket_info
+    }
+    serialized_data = pickle.dumps(serialized_data)
+    self.unicast_fd.sendto(serialized_data, (MULTICAST_GROUP, MULTICAST_PORT))
+    
+    received_loads = []
 
-    return fd
+    end_period = time.time() + MULTICAST_WAITING_PERIOD
+    while time.time() < end_period:
+      for _ in range(TRIES):
+        readable, _, _ = select.select([self.unicast_fd], [], [], TIMEOUT)
+        if self.unicast_fd not in readable:
+          continue
+        
+        deserialized_data, _ = self.unicast_fd.recvfrom(PACKET_LENGTH)
+        deserialized_data = pickle.loads(deserialized_data)
+
+        received_loads.append({
+          'environment_id': deserialized_data['environment_id'],
+          'environment_load': deserialized_data['environment_load']
+        })
+
+    if not received_loads:
+      return
+
+    
+    # Compute loaded environments that need to receive some of current load    
+    least_loaded_environments = self.get_least_loaded_environments(received_loads)
+    if not least_loaded_environments:
+      return
+    
+    print('Least Loaded Environments:', least_loaded_environments)
+    for least_loaded_environment in least_loaded_environments:
+      address = least_loaded_environment['environment_id'].split(',')
+      dst_ip = address[0]
+      dst_port = int(address[1])
+
+
+      for _ in range(least_loaded_environment['expected_processes']):
+        environment_id, group_id, process_id = self.lra_process()
+        if not environment_id or group_id < 0 or process_id < 0:
+          break
+        
+        self.migrate(environment_id, group_id, process_id, dst_ip, dst_port)
+
+
+  def __unicast_socket_init(self):
+    unicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    unicast_fd.setblocking(False)
+
+    return unicast_fd
+
+  def __multicast_socket_init(self):
+    multicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    multicast_fd.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    multicast_fd.bind((MULTICAST_GROUP, MULTICAST_PORT))
+
+    mreq = struct.pack("4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
+    multicast_fd.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    multicast_fd.setblocking(False)
+
+    return multicast_fd
+
+
+  def __tcp_socket_init(self, address: str = '', port: int = 0):
+    tcp_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp_fd.bind((address, port))
+    tcp_fd.listen()
+
+    return tcp_fd

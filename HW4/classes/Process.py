@@ -7,6 +7,7 @@ import socket
 import select
 import pickle
 
+KILLED = -2
 UNBLOCKED = -1
 RESET = 0
 BLOCKED = 1
@@ -20,6 +21,7 @@ class Process:
   def __init__(self, file_path, file_content, parent_group,
       process_id: int, ip, data, received_messages, *argv): 
     
+
     self.file_path = file_path
     
     self.flags = RESET
@@ -33,7 +35,7 @@ class Process:
     # argc and argv[]
     self.argc = len(argv) + 1
     self.argv = (self.file_path, ) + argv
-
+    
     # Content of file
     self.file_content = file_content
 
@@ -51,6 +53,8 @@ class Process:
   
     # Data
     self.data = data
+    for i in range(self.argc):
+      self.data[f'$argv{i}'] = self.argv[i]
 
     # Buffer of buffers used to identify messages received from processes
     self.received_messages = received_messages
@@ -63,38 +67,41 @@ class Process:
     # Listener socket (blocking)
     self.udp_listener_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.udp_listener_socket.bind(('', 0))
+    self.udp_sender_socket.setblocking(False)
 
 
     # Listener thread to receive messages from other processes
     self.udp_listener = threading.Thread(target=self.__udp_listener_thread)
     self.udp_listener.start()
 
-    # Locks
-    self.flags_mutex = threading.Lock()
 
   def __udp_listener_thread(self):
     while True:
+      readable, _, _ = select.select([self.udp_listener_socket], [], [], TIMEOUT)
+      
+      # Thread must be terminated and joined when kill
+      # or migration calls are requested
+      if self.flags == MIGRATED or self.flags == KILLED:
+        print('Finished')
+        return
+      
+      # Polling
+      if self.udp_listener_socket not in readable:
+        continue
+    
       message, process_address = self.udp_listener_socket.recvfrom(PACKET_LENGTH)
-      self.flags_mutex.acquire()
-      if self.flags != MIGRATED:
-        message = pickle.loads(message)
-        # print('***', message)
-        # print('---', message)
-        if message['request_type'] == 'receive':
-          self.flags = UNBLOCKED
-          # print('+++', self.flags)
-          
+      message = pickle.loads(message)
 
+      if message['request_type'] == 'receive':
+        self.flags = UNBLOCKED
+      
+      elif message not in self.received_messages and message['request_type'] == 'send': 
+        self.received_messages.append(message)
 
-        elif message not in self.received_messages and message['request_type'] == 'send': 
-          self.received_messages.append(message)
-          
-        
-        self.udp_listener_socket.sendto('ACK'.encode(), process_address)
-        self.flags_mutex.release()
-      else:
-        self.flags_mutex.release()
-        break
+      # Send ACK as a response
+      self.udp_listener_socket.sendto('ACK'.encode(), process_address)
+      
+
 
   # Execute n instructions from current instruction pointer
   def execute(self, n: int):
@@ -109,15 +116,16 @@ class Process:
         if self.flags == BLOCKED:
           break
         
+      
         self.parent_group.migration_mutex.acquire()
-        
-        self.flags_mutex.acquire()
+
         if self.flags == MIGRATED:
-          self.flags_mutex.release()
+          print('here-------------------------------')
           self.parent_group.migration_mutex.release()
           break
-        self.flags_mutex.release()
 
+        
+        
         if not self.__execute_instruction():
           # An error might have occurred, thus return the flawed
           # instruction line number and its content
@@ -140,16 +148,18 @@ class Process:
   # pointer is set appropriately.
   def __execute_instruction(self):
     instruction_fields = self.instructions[self.ip].split(' ')
-    # print(self.instructions[self.ip])
+    
     # Check if instruction starts with a label and ignore it
+    
     if instruction_fields[0][0] == '#':
-      label1 = instruction_fields.pop(0)
+      
+      instruction_fields.pop(0)
       if not len(instruction_fields):
         self.ip = self.ip + 1
         return True
-      
+
     instruction_type = instruction_fields[0]
-  
+      
     if instruction_type == 'SET':
       # Check if instruction is syntactically valid
       if len(instruction_fields) != 3:
@@ -218,8 +228,7 @@ class Process:
       self.ip = self.ip + 1
     
     elif instruction_type == 'BGT' or instruction_type == 'BGE' or instruction_type == 'BLT' or \
-      instruction_type == 'BLE' or instruction_fields == 'BEQ':
-
+      instruction_type == 'BLE' or instruction_type == 'BEQ':
       # Check if instruction is syntactically valid
       if len(instruction_fields) != 4:
         return False
@@ -227,7 +236,6 @@ class Process:
       l_var = instruction_fields[1]
       r_var = instruction_fields[2]
       label = instruction_fields[3]
-
 
       status, l_var = self.__check_get_var(l_var)
       if not status:
@@ -301,7 +309,7 @@ class Process:
       self.ip = self.ip + 1
     
     elif instruction_type == 'PRN':
-      print(f"Group[{self.parent_group.group_id}] Process[{self.process_id}]:", end = ' ')
+      print(f"Group[{self.parent_group.environment_id} {self.parent_group.group_id}] Process[{self.process_id}]:", end = ' ')
       for field in instruction_fields[1:]:
         if field[0] == '$':
           print(f"{self.data[field]}", end = ' ')
@@ -314,16 +322,16 @@ class Process:
     elif instruction_type == 'SND':
       if len(instruction_fields) < 3:
         return False
-      
-      if not instruction_fields[1].isnumeric():
-        return False
 
-      destination = int(instruction_fields[1])
+      status, dst_proc = self.__check_get_var(instruction_fields[1])
+      if not status:
+        return False
+      
       
       destination_process_found = False
       destination_process_address = None
       for process in self.parent_group.group_addresses:
-        if int(process['process_id']) != destination:
+        if int(process['process_id']) != dst_proc:
           continue
         
         destination_process_found = True
@@ -355,21 +363,19 @@ class Process:
       }
       serialized_data = pickle.dumps(serialized_data)
 
-
+      
       self.udp_sender_socket.sendto(serialized_data, destination_process_address)
       for _ in range(TRIES):
         readable, _, _ = select.select([self.udp_sender_socket], [], [], TIMEOUT)
 
         if self.udp_sender_socket in readable:                    
           data, process_address = self.udp_sender_socket.recvfrom(PACKET_LENGTH)
-          self.flags_mutex.acquire()
+          
           # Race conditions might exist here, thus the flags must be checked
           if self.flags == UNBLOCKED:
             self.flags = RESET
           else:
             self.flags = BLOCKED
-
-          self.flags_mutex.release()
 
           self.ip = self.ip + 1
           return True
@@ -379,10 +385,10 @@ class Process:
       if len(instruction_fields) < 3:
         return False
       
-      if not instruction_fields[1].isnumeric():
+      status, src_proc = self.__check_get_var(instruction_fields[1])
+      if not status:
         return False
       
-      src_proc = int(instruction_fields[1])
       
       # Find if process exists
       source_process_found = False
@@ -401,14 +407,15 @@ class Process:
         print(src_proc, self.parent_group.group_addresses)
         return False
 
-       # Return true but do not increment the ip since send must be retried
+      # Return true but do not increment the ip since send must be retried.
+      # Process is being migrated 
       if not source_process_address:
         return True
 
 
       vars = instruction_fields[2:]
 
-      
+     
       for received_message in self.received_messages[:]:
         if received_message['process_id'] != src_proc:
           continue
@@ -425,7 +432,6 @@ class Process:
         }
         serialized_data = pickle.dumps(serialized_data)
 
- 
         self.udp_sender_socket.sendto(serialized_data, source_process_address)
         for _ in range(TRIES):
           readable, _, _ = select.select([self.udp_sender_socket], [], [], TIMEOUT)
@@ -437,7 +443,6 @@ class Process:
             self.received_messages.remove(received_message)
             
             self.ip = self.ip + 1
-            # print('RM', received_message, self.ip)
 
             return True
     
@@ -464,11 +469,15 @@ class Process:
       if var not in self.data: # Variable not yet defined
         return False, -1
       
-      if isinstance(self.data[var], str): # Value must be integer
-        return False, -1
+      if not force_numeric:
+        return True, self.data[var]
       
-      var = self.data[var]
-    
+      if isinstance(self.data[var], str):
+        if not self.data[var].lstrip('-').isdigit(): # Value must be integer
+          return False, -1
+            
+      var = int(self.data[var])
+      
 
     # Value might also be a literal
     else:      
@@ -476,6 +485,7 @@ class Process:
         return False, -1 
       elif force_numeric:
         var = int(var)
+
 
     return True, var
 

@@ -13,7 +13,6 @@ if __name__ == '__main__':
     commands = commands.split('||')
     
     group = Group(environment_container.socket_info, environment_container.group_count)
-    group.insert_environment(environment_container.socket_info)
     
     for command in commands:
       command_fields = command.split(' ')
@@ -25,12 +24,29 @@ if __name__ == '__main__':
       
       elif command_type == 'run':
         program =  command_fields[1]
-        args = command_fields[2:]
         
+        # Handle whitespaces in strings
+        arguments = []
+        args = command_fields[2:]
+        i = 0
+        while i < len(args) -1:
+          if (args[i][0] == '"' or args[i][0] == "'") and (args[i][-1] != '"' or args[i][-1] != "'"):
+            argument = args[i]
+
+            argument = args[i] + ' ' + args[i + 1]
+            arguments.append(argument)
+            i = i + 2
+          else:
+            arguments.append(args[i])
+            i = i + 1
+        if len(arguments):
+          arguments.append(args[-1])
+
+        print(arguments)
         file_content = EnvironmentContainer.read_file(program)
         # Insert process to group
-        group.insert_process(
-          Process(program, file_content, group, group.process_count, 0, {}, [], *args))
+        group.insert_process(group.environment_id, Process(program, 
+          file_content, group, group.process_count, 0, {}, [], *arguments))
         
       elif command_type == 'migrate':
         group_id    = int(command_fields[1])
@@ -41,13 +57,19 @@ if __name__ == '__main__':
         environment_container.migrate(group_id, process_id ,dst_ip, dst_port)
 
       elif command_type == 'list':
-        group_id    = int(command_fields[1])
-        environment_container.group_list(group_id)
+        environment_id = command_fields[1]
+        group_id    = int(command_fields[2])
+        environment_container.list_group(group_id, environment_id)
+      elif command_type == 'kill':
+        environment_id = command_fields[1]
+        group_id    = int(command_fields[2])
+        environment_container.kill_group(environment_id, group_id)
 
+          
     # If group has at least one process then it is added
     # to the environment container
     if not group.is_empty:
-      environment_container.insert_group(group)
+      environment_container.insert_group(group, True)
       # print(environment_container.group_count)
 
 
