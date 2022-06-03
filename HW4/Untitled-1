@@ -1,5 +1,5 @@
 run tests/ping_pong_3/test1.ss||run tests/ping_pong_3/test2.ss||run tests/ping_pong_3/test3.ss
-migrate 0 1 127.0.0.1 52093
+migrate 0.0.0.0,58375 0 0 127.0.0.1 42331
 migrate 0 1 127.0.0.1 37723
 
 

@@ -2,12 +2,27 @@ from classes.Process import *
 from classes.EnvironmentContainer import *
 from classes.Group import *
 from classes.Process import *
+import sys
+
+LOAD_BALANCE = True
 
 if __name__ == '__main__':
-  environment_container = EnvironmentContainer()
- 
-  while True:
+  loadd_balancer_ip   = None
+  load_balancer_port  = None
+  
+  if LOAD_BALANCE:
+    if len(sys.argv) != 3:
+      print('python3 environment.py <IP> <PORT>')
+      exit(0)
+    loadd_balancer_ip =   sys.argv[1]
+    load_balancer_port =  int(sys.argv[2])
 
+
+  environment_container = EnvironmentContainer(load_balance_enabled=LOAD_BALANCE, 
+    load_balancer_address=(loadd_balancer_ip, load_balancer_port))
+ 
+
+  while True:
     commands = input('Command: ')
     #commands = 'run tests/ping_pong_3/test1.ss||run tests/ping_pong_3/test2.ss||run tests/ping_pong_3/test3.ss'
     commands = commands.split('||')

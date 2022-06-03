@@ -13,8 +13,6 @@ from classes.Group import Group
 from classes.Process import BLOCKED, KILLED, MIGRATED, PACKET_LENGTH, Process
 import pickle
 
-LOAD_BALANCE = True
-
 N = 4
 TRIES = 4
 TIMEOUT = 0.2
@@ -24,7 +22,7 @@ MULTICAST_GROUP = '224.1.1.1'
 MULTICAST_PORT = 8000
 
 class EnvironmentContainer:
-  def __init__(self):
+  def __init__(self, load_balance_enabled=False, load_balancer_address=()):
     self.tcp_listener_fd = self.__tcp_socket_init() 
     print(self.tcp_listener_fd.getsockname())
     self.groups = []
@@ -35,7 +33,10 @@ class EnvironmentContainer:
     self.tcp_listener = threading.Thread(target=self.__tcp_listener_thread)
     self.tcp_listener.start()
 
-    if LOAD_BALANCE:
+    self.load_balance_enabled = load_balance_enabled
+
+    if self.load_balance_enabled:
+      self.load_balancer_address = load_balancer_address
       self.multicast_fd = self.__multicast_socket_init()
       self.unicast_fd = self.__unicast_socket_init()
       self.multicast_listener = threading.Thread(target=self.__multicast_listener_thread)
@@ -207,7 +208,7 @@ class EnvironmentContainer:
 
     # Get processes from the environments that have the most load
     received_loads, _ = self.load_balance()
-    print(received_loads)
+    print('========', received_loads)
     
     
     
@@ -300,9 +301,56 @@ class EnvironmentContainer:
       self.groups.remove(group)  
 
     group.migration_mutex.release()
+  
+
+  def baton_acquire_request(self, sender_socket_fd):
+    # Send a Baton Acquire Request to the Coordinator
+    serialized_data = {
+      'request_type': 'baton_acquire_request'
+    }
+    serialized_data = pickle.dumps(serialized_data)
+
+    # Request Baton
+    sender_socket_fd.send(serialized_data)
     
 
+    # Get Baton
+    desirialized_data = sender_socket_fd.recv(PACKET_LENGTH)
+    if desirialized_data != b'ACK':
+      return False
+    
+    print('Baton Acquired')
+    return True
+
+
+  def baton_release_request(self, sender_socket_fd):
+    # Send a Baton Acquire Request to the Coordinator
+    serialized_data = {
+      'request_type': 'baton_release_request'
+    }
+    serialized_data = pickle.dumps(serialized_data)
+
+    # Request Baton
+    sender_socket_fd.send(serialized_data)
+    
+
+    # Get Baton
+    desirialized_data = sender_socket_fd.recv(PACKET_LENGTH)
+    if desirialized_data != b'ACK':
+      return False
+    
+    print('Baton Release')
+    return True
+
+
+
   def load_balance(self):
+    sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sender_socket_fd.connect(self.load_balancer_address)
+    status = self.baton_acquire_request(sender_socket_fd=sender_socket_fd)
+    if not status:
+      return
+
     # Group just joined thus send to all environments to learn about their loads
     serialized_data = {
       'request_type': 'load_discovery_request',
@@ -312,8 +360,6 @@ class EnvironmentContainer:
     self.unicast_fd.sendto(serialized_data, (MULTICAST_GROUP, MULTICAST_PORT))
     
     
-
-   
     received_loads = []
     end_period = time.time() + MULTICAST_WAITING_PERIOD
     while time.time() < end_period:
@@ -332,12 +378,16 @@ class EnvironmentContainer:
 
 
     if not received_loads:
+      # Send Baton Release Request
+      self.baton_release_request(sender_socket_fd)
       return None, None
     
 
     # Compute loaded environments that need to send some of their load    
     most_loaded_environments = self.get_most_loaded_environments(received_loads)
     if not most_loaded_environments:
+      # Send Baton Release Request
+      self.baton_release_request(sender_socket_fd)
       return received_loads, None
 
     print('Most Loaded Environments:', most_loaded_environments)
@@ -362,6 +412,9 @@ class EnvironmentContainer:
 
       # Receive an acknowledgement
       sender_socket_fd.recv(PACKET_LENGTH)
+      print('***** here')
+    # Send Baton Release Request
+    self.baton_release_request(sender_socket_fd)
     
     return received_loads, most_loaded_environments
       
@@ -408,10 +461,10 @@ class EnvironmentContainer:
     
     most_loaded_environments = []
     for load in received_loads:
-      print('*****', average_load, load['environment_load'], upper_limit)
+      print('*****', average_load, current_load, load['environment_load'], upper_limit)
       if current_load < lower_limit:
         if load['environment_load'] > upper_limit:
-          expected_processes = load['environment_load'] - average_load
+          expected_processes = math.ceil(load['environment_load'] - average_load -1) 
           if expected_processes < 1:
             expected_processes = int(math.ceil(expected_processes))
           else:
@@ -621,9 +674,14 @@ class EnvironmentContainer:
           
 
 
+          sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          sender_socket_fd.connect(self.load_balancer_address)
+          status = self.baton_acquire_request(sender_socket_fd=sender_socket_fd)
+          if not status:
+            return
 
           # ????????????????????????
-          print('========', least_loaded_environments)
+          print('>>>>>>>>>', least_loaded_environments)
           for least_loaded_environment in least_loaded_environments:
             address = least_loaded_environment['environment_id'].split(',')
             dst_ip = address[0]
@@ -638,9 +696,10 @@ class EnvironmentContainer:
               self.migrate(environment_id, group_id, process_id, dst_ip, dst_port)
 
             connection.send('ACK'.encode())
-
           
-          # self.load_balance()
+          # Send Baton Release Request
+          self.baton_release_request(sender_socket_fd)
+          
           
 
 
@@ -683,15 +742,22 @@ class EnvironmentContainer:
               self.groups.remove(self.groups[i])
 
 
-  def insert_group(self, group, load_balancing: bool):
+  def insert_group(self, group, force_load_balancing: bool):
     if group.is_empty:
       return
     
     self.groups.append(group)
     
     # Load balancing is disabled
-    if not LOAD_BALANCE or not load_balancing:
+    if not self.load_balance_enabled or not force_load_balancing:
       return
+
+    sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sender_socket_fd.connect(self.load_balancer_address)
+    status = self.baton_acquire_request(sender_socket_fd=sender_socket_fd)
+    if not status:
+      return
+
 
     # Group just joined thus send to all environments to learn about their loads
     serialized_data = {
@@ -719,12 +785,16 @@ class EnvironmentContainer:
         })
 
     if not received_loads:
+      # Send Baton Release Request
+      self.baton_release_request(sender_socket_fd)
       return
 
     
     # Compute loaded environments that need to receive some of current load    
     least_loaded_environments = self.get_least_loaded_environments(received_loads)
     if not least_loaded_environments:
+      # Send Baton Release Request
+      self.baton_release_request(sender_socket_fd)
       return
     
     print('Least Loaded Environments:', least_loaded_environments)
@@ -741,6 +811,9 @@ class EnvironmentContainer:
         
         self.migrate(environment_id, group_id, process_id, dst_ip, dst_port)
 
+    # Send Baton Release Request
+    self.baton_release_request(sender_socket_fd)
+    
 
   def __unicast_socket_init(self):
     unicast_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
