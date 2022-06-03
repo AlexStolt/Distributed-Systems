@@ -120,7 +120,6 @@ class Process:
         self.parent_group.migration_mutex.acquire()
 
         if self.flags == MIGRATED:
-          print('here-------------------------------')
           self.parent_group.migration_mutex.release()
           break
 
