@@ -13,7 +13,7 @@ run default_tests/multiply.txt 10 20
 run default_tests/multiply.txt 0 20
 run default_tests/multiply.txt -1 20
 
-kill 0.0.0.0,55277 1
+kill 0.0.0.0,44939 0
 
 # Sender/Receiver Tests
 run default_tests/sender.txt 1 10 "hello there" 5||run default_tests/receiver.txt 0 10

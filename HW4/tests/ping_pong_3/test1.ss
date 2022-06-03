@@ -1,6 +1,7 @@
 #SIMPLESCRIPT
 
 #label
+SLP 1
 
 SND 1 ping
 
