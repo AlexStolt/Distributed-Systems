@@ -55,7 +55,7 @@ class Process:
     self.data = data
     for i in range(self.argc):
       self.data[f'$argv{i}'] = self.argv[i]
-
+    
     # Buffer of buffers used to identify messages received from processes
     self.received_messages = received_messages
     
@@ -82,7 +82,6 @@ class Process:
       # Thread must be terminated and joined when kill
       # or migration calls are requested
       if self.flags == MIGRATED or self.flags == KILLED:
-        print('Finished')
         return
       
       # Polling
@@ -474,7 +473,7 @@ class Process:
       if isinstance(self.data[var], str):
         if not self.data[var].lstrip('-').isdigit(): # Value must be integer
           return False, -1
-            
+          
       var = int(self.data[var])
       
 

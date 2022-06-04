@@ -54,10 +54,11 @@ if __name__ == '__main__':
           else:
             arguments.append(args[i])
             i = i + 1
-        if len(arguments):
+
+        if len(args): 
           arguments.append(args[-1])
 
-        print(arguments)
+
         file_content = EnvironmentContainer.read_file(program)
         # Insert process to group
         group.insert_process(group.environment_id, Process(program, 

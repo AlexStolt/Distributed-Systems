@@ -30,6 +30,9 @@ class EnvironmentContainer:
     self.tcp_listener_fd = self.__tcp_socket_init() 
     print(self.tcp_listener_fd.getsockname())
     self.groups = []
+    
+    # Variable used to assign group ids
+    self.group_count = 0
 
     self.scheduler = threading.Thread(target=self.__scheduler)
     self.scheduler.start()
@@ -47,11 +50,7 @@ class EnvironmentContainer:
       self.multicast_listener.start()
       self.load_balance()
 
-  @property
-  def group_count(self):
-    return len(self.groups)
-
-
+  
   @property
   def socket_info(self):
     delimiter = ','
@@ -108,14 +107,10 @@ class EnvironmentContainer:
   # Kill a process that runs on the local environment
   def kill_local_process(self, group, process):
     process.flags = KILLED
-    process.udp_listener.join()
-    print('Process Killed')
-    
+    process.udp_listener.join()  
 
+    # Remove process from group
     group.processes.remove(process)
-    if not len(group.processes):
-      print('Group Removed')
-      self.groups.remove(group)
 
 
   # Remove process from group addresses since the process is no longer active
@@ -135,35 +130,56 @@ class EnvironmentContainer:
     if not group:
       return False
     
-    # Find process to check is process is running on local environment
-    process = group.find_process(process_id)
-    
-    group.migration_mutex.acquire()
+    serialized_data = {
+      "request_type": "kill_process_request",
+      "environment_id": environment_id,
+      "group_id": group_id,
+      "process_id": process_id
+    }
+    serialized_data = pickle.dumps(serialized_data)
 
-    # Process runs on local environment
-    if process:
-      self.kill_local_process(group, process)
-    
+    # Fragment Packet
+    fragments = [serialized_data[i:i+FRAGMENT_LENGTH] for i in range(0, len(serialized_data), FRAGMENT_LENGTH)]
+
     # Update all remote environments
+    unique_environments = []
     for process_address in group.group_addresses:
+      if process_address['process_environment_id'] in unique_environments:
+        continue
+
+      # Add environment as an updated environment to not update again
+      unique_environments.append(process_address['process_environment_id'])
+      
       if process_address['process_environment_id'] != self.socket_info:
         address = process_address['process_environment_id'].split(',')
         dst_ip = address[0]
         dst_port = int(address[1])
 
-        serialized_data = {
-          "request_type": "kill_process_request",
-          "environment_id": environment_id,
-          "group_id": group_id,
-          "process_id": process_id
-        }
-        serialized_data = pickle.dumps(serialized_data)
-
         sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sender_socket_fd.connect((dst_ip, dst_port))
+        # Send all fragments (and notify the receiver that more fragments will be sent)
+        for fragment in fragments[:-1]:
+          serialized_data = {
+            'MF': 1, # More Fragments
+            'data': fragment
+          }
+          serialized_data = pickle.dumps(serialized_data)
+          sender_socket_fd.send(serialized_data)
+          
+          # Receive an acknowledgement
+          sender_socket_fd.recv(PACKET_LENGTH)
+        
+        # Send the final fragment
+        serialized_data = {
+          'MF': 0, # No More Fragments
+          'data': fragments[-1]
+        }
+        serialized_data = pickle.dumps(serialized_data)
         sender_socket_fd.send(serialized_data)
-    
-
+        
+        # Receive an acknowledgement
+        sender_socket_fd.recv(PACKET_LENGTH)
+        
         # Receive an acknowledgement
         sender_socket_fd.recv(PACKET_LENGTH)
       
@@ -171,7 +187,6 @@ class EnvironmentContainer:
     # Remove process communication address since process is removed
     self.kill_process_address_communication(group, process_id)
       
-    group.migration_mutex.release()
   
   
   def kill_group(self, environment_id: str, group_id: int):
@@ -225,7 +240,7 @@ class EnvironmentContainer:
         
         # Send the final fragment
         serialized_data = {
-          'MF': 0, # More Fragments
+          'MF': 0, # No More Fragments
           'data': fragments[-1]
         }
         serialized_data = pickle.dumps(serialized_data)
@@ -285,7 +300,7 @@ class EnvironmentContainer:
           
           # Send the final fragment
           serialized_data = {
-            'MF': 0, # More Fragments
+            'MF': 0, # No More Fragments
             'data': fragments[-1]
           }
           serialized_data = pickle.dumps(serialized_data)
@@ -361,7 +376,6 @@ class EnvironmentContainer:
 
     # Send all fragments (and notify the receiver that more fragments will be sent)
     for fragment in fragments[:-1]:
-      print('Hellllo')
       serialized_data = {
         'MF': 1, # More Fragments
         'data': fragment
@@ -374,7 +388,7 @@ class EnvironmentContainer:
     
     # Send the final fragment
     serialized_data = {
-      'MF': 0, # More Fragments
+      'MF': 0, # No More Fragments
       'data': fragments[-1]
     }
     serialized_data = pickle.dumps(serialized_data)
@@ -409,8 +423,8 @@ class EnvironmentContainer:
     
 
     # Get Baton
-    desirialized_data = sender_socket_fd.recv(PACKET_LENGTH)
-    if desirialized_data != b'ACK':
+    deserialized_data = sender_socket_fd.recv(PACKET_LENGTH)
+    if deserialized_data != b'ACK':
       return False
     
     print('\033[32mBaton Acquired\033[00m')
@@ -429,8 +443,8 @@ class EnvironmentContainer:
     
 
     # Get Baton
-    desirialized_data = sender_socket_fd.recv(PACKET_LENGTH)
-    if desirialized_data != b'ACK':
+    deserialized_data = sender_socket_fd.recv(PACKET_LENGTH)
+    if deserialized_data != b'ACK':
       return False
     
     print('\033[32mBaton Release\033[00m')
@@ -521,7 +535,7 @@ class EnvironmentContainer:
 
         # Send the final fragment
         serialized_data = {
-          'MF': 0, # More Fragments
+          'MF': 0, # No More Fragments
           'data': fragments[-1]
         }
         serialized_data = pickle.dumps(serialized_data)
@@ -690,7 +704,7 @@ class EnvironmentContainer:
             group_exists = True
             process = Process(
               deserialized_data['file_path'], deserialized_data['file_content'], group, deserialized_data['process_id'], 
-              deserialized_data['ip'], deserialized_data['data'], deserialized_data['received_messages'], deserialized_data['argv'])
+              deserialized_data['ip'], deserialized_data['data'], deserialized_data['received_messages'])
             
             group.insert_process(self.socket_info, process)
             break
@@ -706,8 +720,7 @@ class EnvironmentContainer:
             process = Process(
               deserialized_data['file_path'], deserialized_data['file_content'], 
               group, deserialized_data['process_id'], deserialized_data['ip'], 
-              deserialized_data['data'], deserialized_data['received_messages'], 
-              deserialized_data['argv'])
+              deserialized_data['data'], deserialized_data['received_messages'])
 
             
             group.insert_group_addresses(deserialized_data['group_addresses'])
@@ -764,7 +777,7 @@ class EnvironmentContainer:
               
               # Send the final fragment
               serialized_data = {
-                'MF': 0, # More Fragments
+                'MF': 0, # No More Fragments
                 'data': fragments[-1]
               }
               serialized_data = pickle.dumps(serialized_data)
@@ -780,13 +793,11 @@ class EnvironmentContainer:
 
         elif deserialized_data['request_type'] == 'kill_process_request':
           group = self.find_group(deserialized_data['group_id'],  deserialized_data['environment_id'])
-          if group:  
-            process = group.find_process(deserialized_data['process_id'])
-            if process:
-              self.kill_local_process(group, process)
-            
-            self.kill_process_address_communication(group, deserialized_data['process_id'])
-
+          if not group:
+            connection.send('ACK'.encode())
+            continue
+          
+          self.kill_process_address_communication(group, deserialized_data['process_id'])
           connection.send('ACK'.encode())
         
         # Kill Group Request
@@ -914,13 +925,16 @@ class EnvironmentContainer:
           
           # If process has finished remove process
           elif index == -2:
-            self.groups[i].processes.remove(process)
+            self.kill_local_process(self.groups[i], process)
+            self.kill_process(self.groups[i].environment_id, self.groups[i].group_id, process.process_id)
             
             # If group is empty remove group
             if not len(self.groups[i].processes):
               print(f'Group[{group.group_id}] removed since all processes finished')
               self.groups.remove(self.groups[i])
-
+            
+            # Try to load balance again since processes are finished
+            self.load_balance()
 
   def insert_group(self, group, force_load_balancing: bool):
     if group.is_empty:
@@ -928,6 +942,10 @@ class EnvironmentContainer:
     
     self.groups.append(group)
     
+    if force_load_balancing:
+      self.group_count = self.group_count + 1
+
+
     # Load balancing is disabled
     if not self.load_balance_enabled or not force_load_balancing:
       return
