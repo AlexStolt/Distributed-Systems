@@ -2,7 +2,7 @@
 ############################# [Custom Tests] #############################
 
 # Simple Ring
-run custom_tests/ring/test1.ss||custom_tests/ring/test2.ss||custom_tests/ring/test3.ss
+run custom_tests/ring/test1.ss||run custom_tests/ring/test2.ss||run custom_tests/ring/test3.ss
 
 # Simple Ring with Syntax Error
 run custom_tests/ring_errors/test1.ss||run custom_tests/ring_errors/test2.ss||run custom_tests/ring_errors/test3.ss
@@ -13,7 +13,7 @@ run custom_tests/ring_errors/test1.ss||run custom_tests/ring_errors/test2.ss||ru
 
 run tests/ping_pong_2/test1.ss||run tests/ping_pong_2/test2.ss
 
-run tests/ping_pong_2/simple_add.ss||run tests/ping_pong_2/simple_add.ss||run tests/ping_pong_2/simple_add.ss||run tests/ping_pong_2/simple_add.ss
+run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss
 
 
 # Multiply Tests
