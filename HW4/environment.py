@@ -23,8 +23,8 @@ if __name__ == '__main__':
  
 
   while True:
-    commands = input('Command: ')
-    #commands = 'run tests/ping_pong_3/test1.ss||run tests/ping_pong_3/test2.ss||run tests/ping_pong_3/test3.ss'
+    commands = input()
+    
     commands = commands.split('||')
     
     group = Group(environment_container.socket_info, environment_container.group_count)
@@ -54,22 +54,24 @@ if __name__ == '__main__':
           else:
             arguments.append(args[i])
             i = i + 1
-        if len(arguments):
+
+        if len(args): 
           arguments.append(args[-1])
 
-        print(arguments)
+
         file_content = EnvironmentContainer.read_file(program)
         # Insert process to group
         group.insert_process(group.environment_id, Process(program, 
           file_content, group, group.process_count, 0, {}, [], *arguments))
         
       elif command_type == 'migrate':
-        group_id    = int(command_fields[1])
-        process_id  = int(command_fields[2])
-        dst_ip      = command_fields[3]
-        dst_port    = int(command_fields[4])
+        environment_id  = command_fields[1]
+        group_id        = int(command_fields[2])
+        process_id      = int(command_fields[3])
+        dst_ip          = command_fields[4]
+        dst_port        = int(command_fields[5])
 
-        environment_container.migrate(group_id, process_id ,dst_ip, dst_port)
+        environment_container.migrate(environment_id, group_id, process_id ,dst_ip, dst_port)
 
       elif command_type == 'list':
         environment_id = command_fields[1]
@@ -85,6 +87,5 @@ if __name__ == '__main__':
     # to the environment container
     if not group.is_empty:
       environment_container.insert_group(group, True)
-      # print(environment_container.group_count)
 
 
