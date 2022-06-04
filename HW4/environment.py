@@ -7,19 +7,19 @@ import sys
 LOAD_BALANCE = True
 
 if __name__ == '__main__':
-  loadd_balancer_ip   = None
+  load_balancer_ip   = None
   load_balancer_port  = None
   
   if LOAD_BALANCE:
     if len(sys.argv) != 3:
       print('python3 environment.py <IP> <PORT>')
       exit(0)
-    loadd_balancer_ip =   sys.argv[1]
+    load_balancer_ip =   sys.argv[1]
     load_balancer_port =  int(sys.argv[2])
 
 
   environment_container = EnvironmentContainer(load_balance_enabled=LOAD_BALANCE, 
-    load_balancer_address=(loadd_balancer_ip, load_balancer_port))
+    load_balancer_address=(load_balancer_ip, load_balancer_port))
  
 
   while True:

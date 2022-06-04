@@ -1,11 +1,19 @@
-run tests/ping_pong_3/test1.ss||run tests/ping_pong_3/test2.ss||run tests/ping_pong_3/test3.ss
-migrate 0.0.0.0,58375 0 0 127.0.0.1 42331
-migrate 0 1 127.0.0.1 37723
+
+############################# [Custom Tests] #############################
+
+# Simple Ring
+run custom_tests/ring/test1.ss||custom_tests/ring/test2.ss||custom_tests/ring/test3.ss
+
+# Simple Ring with Syntax Error
+run custom_tests/ring_errors/test1.ss||run custom_tests/ring_errors/test2.ss||run custom_tests/ring_errors/test3.ss
+
+
+
 
 
 run tests/ping_pong_2/test1.ss||run tests/ping_pong_2/test2.ss
 
-run tests/ping_pong_2/simple_add.ss||run tests/ping_pong_2/simple_add.ss||run tests/ping_pong_2/simple_add.ss
+run tests/ping_pong_2/simple_add.ss||run tests/ping_pong_2/simple_add.ss||run tests/ping_pong_2/simple_add.ss||run tests/ping_pong_2/simple_add.ss
 
 
 # Multiply Tests
@@ -13,7 +21,9 @@ run default_tests/multiply.txt 10 20
 run default_tests/multiply.txt 0 20
 run default_tests/multiply.txt -1 20
 
-kill 0.0.0.0,55277 1
+kill 0.0.0.0,45939 0
+
+list 0.0.0.0,39767 1
 
 # Sender/Receiver Tests
 run default_tests/sender.txt 1 10 "hello there" 5||run default_tests/receiver.txt 0 10

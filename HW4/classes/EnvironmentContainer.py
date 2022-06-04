@@ -181,9 +181,11 @@ class EnvironmentContainer:
     # Kill processes running on local environment
     for process in group.processes[:]:
       self.kill_local_process(group, process)
-      
-    print(group.group_addresses)
+    
+
     for process_address in group.group_addresses:
+      if not process_address:
+        continue
       # Processes that are located on different environments
       if process_address['process_environment_id'] != self.socket_info:
         address = process_address['process_environment_id'].split(',')
@@ -205,14 +207,20 @@ class EnvironmentContainer:
         # Receive an acknowledgement
         sender_socket_fd.recv(PACKET_LENGTH)
 
-      
-
+    # Completely Remove Group  
+    print(group, self.groups)
+    if group in self.groups:
+      self.groups.remove(group)
+    
+    
     # Get processes from the environments that have the most load
     received_loads, _ = self.load_balance()
     print('========', received_loads)
     
-    
-    
+    if not received_loads:
+      group.migration_mutex.release()
+      return
+
     # Request other environments to load balance
     for environment in received_loads:
       # Processes that are located on different environments
@@ -290,7 +298,7 @@ class EnvironmentContainer:
     }
     
     serialized_data = pickle.dumps(serialized_data)
-
+    print(len(serialized_data))
     # Send process to client
     sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sender_socket_fd.connect((dst_ip, dst_port))
@@ -454,7 +462,7 @@ class EnvironmentContainer:
             'environment_id': load['environment_id'],
             'expected_processes': expected_processes
           })
-          current_load = current_load - max(expected_processes, upper_limit)
+          current_load = current_load - min(expected_processes, upper_limit)
 
     return least_loaded_environments
 
@@ -744,7 +752,7 @@ class EnvironmentContainer:
           # Error has occurred
           if not status:
             print(f'Group[{group.group_id}] removed due to process {process.process_id} error in line {index}: {instruction}')
-            self.groups.remove(group)
+            self.kill_group(group.environment_id, group.group_id)
             break
           
           # N instruction were successfully executed
