@@ -1,3 +1,13 @@
+############################# How to Run #############################
+1. Load Balancing Deactivated (LOAD_BALANCE Flag in environment.py is False)
+* python3 environment.py
+
+2. Load Balancing Activated (LOAD_BALANCE Flag in environment.py is True)
+* python3 load_balancer.py <IP> <PORT>
+* python3 environment.py <IP> <PORT>
+
+
+[Notes]: The Load Balancing is Activated by Default
 
 ############################# [Custom Tests] #############################
 
@@ -8,16 +18,9 @@ run custom_tests/ring/test1.ss||run custom_tests/ring/test2.ss||run custom_tests
 run custom_tests/ring_errors/test1.ss||run custom_tests/ring_errors/test2.ss||run custom_tests/ring_errors/test3.ss
 
 
-# Simple Ring and a Process Finishes
+# Simple Ring and Some Processes Finish Earlier
 run custom_tests/ring/test1.ss||run custom_tests/ring/test2.ss||run custom_tests/ring/test3.ss
 run custom_tests/process_finishes/simple_process.ss 0 10 2||run custom_tests/process_finishes/simple_process.ss 0 10 2||run custom_tests/process_finishes/simple_process.ss 0 100 2||run custom_tests/process_finishes/simple_process.ss 0 100 2
-
-
-run tests/ping_pong_2/test1.ss||run tests/ping_pong_2/test2.ss
-
-run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss||run custom_tests/ping_pong_2/simple_add.ss
-
-
 
 ############################# [Default Tests] #############################
 
@@ -32,10 +35,11 @@ run default_tests/sender.txt 1 10 "hello there" 5||run default_tests/receiver.tx
 # test2: Sender/Receiver Ring
 run default_tests/ring.txt 0 1 2 10 3||run default_tests/ring.txt 1 2 0 10 3||run default_tests/ring.txt 2 0 1 10 3
 
+# Kill Examples
+kill 0.0.0.0,56977 0
 
+# List Examples
+list 0.0.0.0,56977 1
 
-
-
-kill 0.0.0.0,43551 0
-
-list 0.0.0.0,55939 0
+# Migrate 
+migrate 0.0.0.0,38419 0 1 127.0.0.1 50785

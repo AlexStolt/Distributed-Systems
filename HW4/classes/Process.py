@@ -402,7 +402,6 @@ class Process:
 
       # Process source not found 
       if not source_process_found:
-        print(src_proc, self.parent_group.group_addresses)
         return False
 
       # Return true but do not increment the ip since send must be retried.
@@ -473,7 +472,7 @@ class Process:
       if isinstance(self.data[var], str):
         if not self.data[var].lstrip('-').isdigit(): # Value must be integer
           return False, -1
-          
+
       var = int(self.data[var])
       
 

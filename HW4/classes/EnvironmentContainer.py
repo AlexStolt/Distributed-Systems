@@ -2,6 +2,7 @@ from enum import unique
 import math
 from multiprocessing import connection
 from os import R_OK, stat
+import re
 import socket
 import threading
 import struct
@@ -13,6 +14,8 @@ from classes.Group import Group
 
 from classes.Process import BLOCKED, KILLED, MIGRATED, PACKET_LENGTH, Process
 import pickle
+
+from environment import LOAD_BALANCE
 
 N = 4
 TRIES = 4
@@ -28,7 +31,7 @@ MULTICAST_PORT = 8000
 class EnvironmentContainer:
   def __init__(self, load_balance_enabled=False, load_balancer_address=()):
     self.tcp_listener_fd = self.__tcp_socket_init() 
-    print(self.tcp_listener_fd.getsockname())
+    print('Environment Address:', self.tcp_listener_fd.getsockname())
     self.groups = []
     
     # Variable used to assign group ids
@@ -227,7 +230,6 @@ class EnvironmentContainer:
 
         # Send all fragments (and notify the receiver that more fragments will be sent)
         for fragment in fragments[:-1]:
-          print('Hellllo')
           serialized_data = {
             'MF': 1, # More Fragments
             'data': fragment
@@ -256,41 +258,50 @@ class EnvironmentContainer:
     if group in self.groups:
       self.groups.remove(group)
     
-    
-    # Get processes from the environments that have the most load
-    received_loads, _ = self.load_balance()
-    print('========', received_loads)
-    
-    if not received_loads:
-      group.migration_mutex.release()
-      return
+    if LOAD_BALANCE:
+      # Get processes from the environments that have the most load
+      received_loads, _ = self.load_balance()
+      
+      if not received_loads:
+        group.migration_mutex.release()
+        return
 
-    # Request other environments to load balance
-    for environment in received_loads:
-      # Processes that are located on different environments
-      if environment['environment_id'] != self.socket_info:
-        address = environment['environment_id'].split(',')
-        dst_ip = address[0]
-        dst_port = int(address[1])
+      # Request other environments to load balance
+      for environment in received_loads:
+        # Processes that are located on different environments
+        if environment['environment_id'] != self.socket_info:
+          address = environment['environment_id'].split(',')
+          dst_ip = address[0]
+          dst_port = int(address[1])
 
-        serialized_data = {
-          "request_type": "kill_migrate_request",
-        }
-        serialized_data = pickle.dumps(serialized_data)
+          serialized_data = {
+            "request_type": "kill_migrate_request",
+          }
+          serialized_data = pickle.dumps(serialized_data)
 
-        # Fragment Packet
-        fragments = [serialized_data[i:i+FRAGMENT_LENGTH] for i in range(0, len(serialized_data), FRAGMENT_LENGTH)]
+          # Fragment Packet
+          fragments = [serialized_data[i:i+FRAGMENT_LENGTH] for i in range(0, len(serialized_data), FRAGMENT_LENGTH)]
 
-        while True:
-          sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-          sender_socket_fd.connect((dst_ip, dst_port))
-          
-          # Send all fragments (and notify the receiver that more fragments will be sent)
-          for fragment in fragments[:-1]:
-            print('Hellllo')
+          while True:
+            sender_socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sender_socket_fd.connect((dst_ip, dst_port))
+            
+            # Send all fragments (and notify the receiver that more fragments will be sent)
+            for fragment in fragments[:-1]:
+              serialized_data = {
+                'MF': 1, # More Fragments
+                'data': fragment
+              }
+              serialized_data = pickle.dumps(serialized_data)
+              sender_socket_fd.send(serialized_data)
+              
+              # Receive an acknowledgement
+              sender_socket_fd.recv(PACKET_LENGTH)
+            
+            # Send the final fragment
             serialized_data = {
-              'MF': 1, # More Fragments
-              'data': fragment
+              'MF': 0, # No More Fragments
+              'data': fragments[-1]
             }
             serialized_data = pickle.dumps(serialized_data)
             sender_socket_fd.send(serialized_data)
@@ -298,22 +309,11 @@ class EnvironmentContainer:
             # Receive an acknowledgement
             sender_socket_fd.recv(PACKET_LENGTH)
           
-          # Send the final fragment
-          serialized_data = {
-            'MF': 0, # No More Fragments
-            'data': fragments[-1]
-          }
-          serialized_data = pickle.dumps(serialized_data)
-          sender_socket_fd.send(serialized_data)
-          
-          # Receive an acknowledgement
-          sender_socket_fd.recv(PACKET_LENGTH)
-        
 
-          # Receive an additional acknowledgement
-          status = sender_socket_fd.recv(PACKET_LENGTH)
-          if status != b'ACK':
-            break
+            # Receive an additional acknowledgement
+            status = sender_socket_fd.recv(PACKET_LENGTH)
+            if status != b'ACK':
+              break
           
     group.migration_mutex.release()
 
@@ -338,7 +338,6 @@ class EnvironmentContainer:
     
     # Wait for threads to terminate and remove process and group
     process.udp_listener.join()
-    print("UDP Listener Thread Returned")
 
     # Set None since data is not stable yet
     for i in range(len(group.group_addresses)):
@@ -353,6 +352,7 @@ class EnvironmentContainer:
     # Serialize data
     serialized_data = {
       "request_type": 'migrate_request',
+      "current_environment_id": self.socket_info,
       "environment_id": group.environment_id,
       "group_id": group.group_id,
       "group_addresses": group.group_addresses,
@@ -400,13 +400,42 @@ class EnvironmentContainer:
 
 
 
-
-    group.processes.remove(process)
+    self.kill_local_process(group, process)
     if not len(group.processes):
       self.groups.remove(group)  
 
+
     # Receive an acknowledgement
-    sender_socket_fd.recv(PACKET_LENGTH)
+    deserialized_data = b''
+    serialized_data = sender_socket_fd.recv(PACKET_LENGTH)
+    
+    while True:
+      serialized_data = pickle.loads(serialized_data)
+      deserialized_data = deserialized_data + serialized_data['data']
+      if not serialized_data['MF']:
+        sender_socket_fd.send(b'ACK')
+        break
+
+      sender_socket_fd.send(b'ACK')
+      serialized_data = sender_socket_fd.recv(PACKET_LENGTH)
+      if not serialized_data:
+        sender_socket_fd.send(b'ACK')
+        break
+
+    deserialized_data = pickle.loads(deserialized_data)
+
+    group = self.find_group(deserialized_data['group_id'], deserialized_data['environment_id'])
+    if not group:
+      sender_socket_fd.send('ACK'.encode()) 
+      return
+
+    for process_address in group.group_addresses:
+      if process_address['process_id'] != deserialized_data['process_id']:
+        continue
+      process_address['process_address'] = deserialized_data['process_address']
+      process_address['process_environment_id'] = deserialized_data['process_environment_id']
+      
+    sender_socket_fd.send('ACK'.encode())
 
     group.migration_mutex.release()
   
@@ -498,7 +527,6 @@ class EnvironmentContainer:
       self.baton_release_request(baton_socket_fd)
       return received_loads, None
 
-    print('Most Loaded Environments:', most_loaded_environments)
     # Send to TCP sockets
     for loaded_environment in most_loaded_environments:
       address = loaded_environment['environment_id'].split(',')
@@ -507,7 +535,6 @@ class EnvironmentContainer:
 
       
       for _ in range(loaded_environment['expected_processes']):
-        print('>>>>> Sendinggg')
         serialized_data = {
           'request_type': 'load_reduction_request',
           'environment_id': self.socket_info
@@ -569,7 +596,6 @@ class EnvironmentContainer:
 
     least_loaded_environments = []
     for load in received_loads:
-      print('*****', average_load, current_load, load['environment_load'], upper_limit)
       if current_load > upper_limit:
         if load['environment_load'] < lower_limit:
           expected_processes = average_load - load['environment_load'] 
@@ -602,7 +628,6 @@ class EnvironmentContainer:
     
     most_loaded_environments = []
     for load in received_loads:
-      print('*****', average_load, current_load, load['environment_load'], upper_limit)
       if current_load < lower_limit:
         if load['environment_load'] > upper_limit:
           expected_processes = load['environment_load'] - average_load
@@ -629,7 +654,7 @@ class EnvironmentContainer:
         if self.multicast_fd in readable:
           deserialized_data, address = self.multicast_fd.recvfrom(PACKET_LENGTH)
           deserialized_data = pickle.loads(deserialized_data)
-          print(deserialized_data)  
+
           if deserialized_data['request_type'] == 'load_discovery_request':
             # Ignore messages from self
             if deserialized_data['environment_id'] == self.socket_info:
@@ -693,8 +718,6 @@ class EnvironmentContainer:
         
         # Migration request
         elif deserialized_data['request_type'] == 'migrate_request':
-          print('>>> Received MIGRATE REquest')
-          
           # Check if group already exists and if not create a new one
           group_exists = False
           for group in self.groups:
@@ -728,7 +751,7 @@ class EnvironmentContainer:
             
             self.insert_group(group, False)
 
-          connection.send('ACK'.encode())
+          # connection.send('ACK'.encode())
           
           # Reply to sender with the new socket that the process has
           serialized_data = {
@@ -750,7 +773,12 @@ class EnvironmentContainer:
           for process_address in group.group_addresses:
             if process_address['process_environment_id'] in unique_environments:
               continue
-
+              
+            # Should not send back to original sender immediately
+            # This will be handled later to keep the environment blocked
+            if process_address['process_environment_id'] == deserialized_data['current_environment_id']:
+              continue
+            
             # Add environment as an updated environment to not update again
             unique_environments.append(process_address['process_environment_id'])
             
@@ -789,7 +817,35 @@ class EnvironmentContainer:
               
               # Receive an additional ACK
               sender_socket_fd.recv(PACKET_LENGTH)
-              
+          
+
+          # Send back to original environment (ACK)
+          for fragment in fragments[:-1]:
+            serialized_data = {
+              'MF': 1, # More Fragments
+              'data': fragment
+            }
+            serialized_data = pickle.dumps(serialized_data)
+            connection.send(serialized_data)
+            
+            # Receive an acknowledgement
+            connection.recv(PACKET_LENGTH)
+          
+          # Send the final fragment
+          serialized_data = {
+            'MF': 0, # No More Fragments
+            'data': fragments[-1]
+          }
+          serialized_data = pickle.dumps(serialized_data)
+          connection.send(serialized_data)
+          
+          # Receive an acknowledgement
+          connection.recv(PACKET_LENGTH)
+
+          
+          # Receive an additional ACK
+          connection.recv(PACKET_LENGTH)
+
 
         elif deserialized_data['request_type'] == 'kill_process_request':
           group = self.find_group(deserialized_data['group_id'],  deserialized_data['environment_id'])
@@ -814,24 +870,18 @@ class EnvironmentContainer:
           address = deserialized_data['environment_id'].split(',')
           dst_ip = address[0]
           dst_port = int(address[1])
-
-          # print(deserialized_data)
-
           
           environment_id, group_id, process_id = self.lra_process()
           if not environment_id or group_id < 0 or process_id < 0:
             break
           
-          print(environment_id, group_id, process_id, dst_ip, dst_port)
           self.migrate(environment_id, group_id, process_id, dst_ip, dst_port)
           
           
-          print('My current load', self.load)
           connection.send('ACK'.encode())
 
         # Migrate after Kill Request
         elif deserialized_data['request_type'] == 'kill_migrate_request':
-          print('&&&&&&&&&&&&& migrate kill')
 
           serialized_data = {
             'request_type': 'load_discovery_request',
@@ -859,7 +909,6 @@ class EnvironmentContainer:
           if not received_loads:
             connection.send('NACK'.encode())
             continue
-          print('------>', received_loads)
           
           # Compute loaded environments that need to receive some of current load    
           least_loaded_environments = self.get_least_loaded_environments(received_loads)
@@ -932,9 +981,9 @@ class EnvironmentContainer:
             if not len(self.groups[i].processes):
               print(f'Group[{group.group_id}] removed since all processes finished')
               self.groups.remove(self.groups[i])
-            
-            # Try to load balance again since processes are finished
-            self.load_balance()
+            if LOAD_BALANCE:
+              # Try to load balance again since processes are finished
+              self.load_balance()
 
   def insert_group(self, group, force_load_balancing: bool):
     if group.is_empty:
@@ -995,7 +1044,7 @@ class EnvironmentContainer:
       self.baton_release_request(sender_socket_fd)
       return
     
-    print('Least Loaded Environments:', least_loaded_environments)
+
     for least_loaded_environment in least_loaded_environments:
       address = least_loaded_environment['environment_id'].split(',')
       dst_ip = address[0]
